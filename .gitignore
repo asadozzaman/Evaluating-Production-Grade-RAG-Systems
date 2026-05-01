@@ -20,6 +20,9 @@ out/
 *.log
 npm-debug.log*
 
+# Uploaded development files
+backend/uploads/
+
 # OS/editor
 .DS_Store
 Thumbs.db

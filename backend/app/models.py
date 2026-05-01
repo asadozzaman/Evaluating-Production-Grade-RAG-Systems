@@ -100,13 +100,34 @@ class Project(TimestampMixin, Base):
 
 class SourceDocument(TimestampMixin, Base):
     __tablename__ = "source_documents"
+    __table_args__ = (
+        CheckConstraint("source_kind IN ('uri', 'file')", name="ck_source_documents_source_kind"),
+        CheckConstraint(
+            "source_kind <> 'uri' OR source_uri IS NOT NULL",
+            name="ck_source_documents_uri_requires_source_uri",
+        ),
+        CheckConstraint(
+            "source_kind <> 'file' OR storage_path IS NOT NULL",
+            name="ck_source_documents_file_requires_storage_path",
+        ),
+        CheckConstraint(
+            "file_size_bytes IS NULL OR file_size_bytes >= 0",
+            name="ck_source_documents_file_size_non_negative",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     document_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    source_kind: Mapped[str] = mapped_column(String(20), default="uri", server_default="uri", nullable=False)
     source_uri: Mapped[str | None] = mapped_column(String(500))
     version: Mapped[str | None] = mapped_column(String(80))
+    original_file_name: Mapped[str | None] = mapped_column(String(255))
+    stored_file_name: Mapped[str | None] = mapped_column(String(255))
+    content_type: Mapped[str | None] = mapped_column(String(100))
+    file_size_bytes: Mapped[int | None] = mapped_column(Integer)
+    storage_path: Mapped[str | None] = mapped_column(String(500))
 
     project: Mapped[Project] = relationship(back_populates="source_documents")
     retrieved_chunks: Mapped[list["RetrievedChunk"]] = relationship(back_populates="source_document")

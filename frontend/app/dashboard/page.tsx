@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { TOKEN_STORAGE_KEY, User, authRequest } from "../lib/auth";
 
 export default function DashboardPage() {
@@ -64,9 +65,14 @@ export default function DashboardPage() {
         </div>
 
         <p className="summary">
-          Authentication and role access are active. Evaluation features are intentionally
-          not implemented yet.
+          Project setup APIs are active. Prepare evaluation workspaces, source document
+          metadata, test questions, and evaluation runs before scoring begins.
         </p>
+
+        <div className="actions">
+          <Link href="/dashboard/projects">Open projects</Link>
+          <Link href="/dashboard/projects/new">New project</Link>
+        </div>
 
         <div className="status" aria-label="Current user">
           <div className="status-row">

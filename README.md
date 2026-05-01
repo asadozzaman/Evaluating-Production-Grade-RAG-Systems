@@ -173,6 +173,136 @@ cd backend
 alembic upgrade head
 ```
 
+## Project Setup APIs
+
+Phase 4 adds authenticated setup APIs for preparing a CLEAR-RAG evaluation workspace. Admins and evaluators can create, update, and delete setup data. Viewers can read setup data only.
+
+Project endpoints:
+
+```text
+POST   /projects
+GET    /projects
+GET    /projects/{project_id}
+PATCH  /projects/{project_id}
+DELETE /projects/{project_id}
+```
+
+Nested setup endpoints:
+
+```text
+POST   /projects/{project_id}/documents
+POST   /projects/{project_id}/documents/upload
+GET    /projects/{project_id}/documents
+GET    /projects/{project_id}/documents/{document_id}
+PATCH  /projects/{project_id}/documents/{document_id}
+DELETE /projects/{project_id}/documents/{document_id}
+
+POST   /projects/{project_id}/questions
+GET    /projects/{project_id}/questions
+GET    /projects/{project_id}/questions/{question_id}
+PATCH  /projects/{project_id}/questions/{question_id}
+DELETE /projects/{project_id}/questions/{question_id}
+
+POST   /projects/{project_id}/runs
+GET    /projects/{project_id}/runs
+GET    /projects/{project_id}/runs/{run_id}
+PATCH  /projects/{project_id}/runs/{run_id}
+DELETE /projects/{project_id}/runs/{run_id}
+```
+
+Frontend setup pages:
+
+```text
+/dashboard/projects
+/dashboard/projects/new
+/dashboard/projects/{projectId}
+```
+
+Phase 4 does not implement retrieved chunk submission, generated answer submission, CLEAR-RAG scoring, dashboards, CSV import/export, document parsing, embeddings, or RAG integration.
+
+### Document Sources
+
+Source documents can now be created in two ways:
+
+```text
+URI metadata: POST /projects/{project_id}/documents
+File upload:  POST /projects/{project_id}/documents/upload
+```
+
+URI document JSON example:
+
+```json
+{
+  "title": "HR Leave Policy",
+  "document_type": "policy",
+  "source_kind": "uri",
+  "source_uri": "memory://hr-leave-policy",
+  "version": "v1"
+}
+```
+
+Upload documents use multipart form data:
+
+```text
+title
+document_type
+version
+file
+```
+
+Supported upload extensions:
+
+```text
+.pdf, .docx, .txt, .csv, .md
+```
+
+Uploaded files are stored under:
+
+```text
+backend/uploads/documents/{project_id}/
+```
+
+This only stores the file and metadata. It does not extract text, parse documents, chunk content, create embeddings, or run retrieval yet.
+
+## RAG Output Intake
+
+Phase 5 adds APIs and a lightweight UI for recording raw RAG outputs before human scoring. Admins and evaluators can add and delete outputs. Viewers can read them only.
+
+Retrieved chunk endpoints:
+
+```text
+POST   /projects/{project_id}/runs/{run_id}/questions/{question_id}/retrieved-chunks
+GET    /projects/{project_id}/runs/{run_id}/questions/{question_id}/retrieved-chunks
+DELETE /projects/{project_id}/runs/{run_id}/questions/{question_id}/retrieved-chunks/{chunk_id}
+```
+
+Generated answer endpoints:
+
+```text
+POST   /projects/{project_id}/runs/{run_id}/questions/{question_id}/generated-answers
+GET    /projects/{project_id}/runs/{run_id}/questions/{question_id}/generated-answers
+DELETE /projects/{project_id}/runs/{run_id}/questions/{question_id}/generated-answers/{answer_id}
+```
+
+Frontend run output page:
+
+```text
+/dashboard/projects/{projectId}/runs/{runId}
+```
+
+Use this page to select a test question, then record:
+
+```text
+retrieved chunks
+generated answers
+retrieval/generation timing
+token counts
+estimated cost
+model name
+```
+
+Phase 5 does not implement CLEAR-RAG scoring, reviewer notes, score calculation, reports, automatic retrieval, embeddings, or LLM-assisted judging.
+
 ## Start the Frontend
 
 In a separate terminal:
@@ -204,6 +334,8 @@ backend/
     schemas.py
     security.py
     routers/
+      auth.py
+      projects.py
   .env.example
   alembic.ini
   requirements.txt
