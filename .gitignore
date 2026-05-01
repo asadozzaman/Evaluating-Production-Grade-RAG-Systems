@@ -1,0 +1,27 @@
+# Environment files
+.env
+.env.*
+!.env.example
+!backend/.env.example
+!frontend/.env.local.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+CLEAR-RAG_ A Practical Framework for Evaluating Production-Grade Retrieval-Augmented Generation Systems.docx
+# Node / Next.js
+node_modules/
+.next/
+out/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
