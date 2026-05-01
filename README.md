@@ -132,6 +132,47 @@ Set a strong JWT secret in `backend/.env` before using anything beyond local dev
 JWT_SECRET_KEY=replace-with-a-long-random-secret
 ```
 
+## Core Database Models
+
+Phase 3 adds the relational foundation for CLEAR-RAG evaluation data. These models exist in the database layer only; full CRUD APIs and business workflows are intentionally deferred.
+
+Core tables:
+
+```text
+projects
+source_documents
+test_questions
+evaluation_runs
+retrieved_chunks
+generated_answers
+evaluation_records
+```
+
+The schema stores the evaluation trail needed by CLEAR-RAG:
+
+```text
+Project -> documents, questions, evaluation runs
+Evaluation run -> retrieved chunks, generated answers, evaluation records
+Evaluation record -> reviewer and five CLEAR-RAG scores
+```
+
+Database constraints enforce the basic rubric and measurement rules:
+
+```text
+CLEAR-RAG scores must be between 1 and 5
+Retrieved chunk rank must be greater than 0
+Token counts, latency values, and estimated cost must be non-negative
+Question type must be one of the supported evaluation question categories
+Retrieved chunk relevance label must be high, medium, low, or irrelevant
+```
+
+Run migrations after pulling schema changes:
+
+```powershell
+cd backend
+alembic upgrade head
+```
+
 ## Start the Frontend
 
 In a separate terminal:
@@ -153,6 +194,7 @@ http://localhost:3000
 ```text
 backend/
   migrations/
+    versions/
   app/
     auth.py
     config.py
