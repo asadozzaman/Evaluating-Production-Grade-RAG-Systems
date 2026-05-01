@@ -1,8 +1,8 @@
 # CLEAR-RAG Project Foundation
 
-This repository contains the initial foundation for a CLEAR-RAG evaluation tool. It includes a FastAPI backend, a Next.js frontend, and a PostgreSQL service managed by Docker Compose.
+This repository contains the foundation for a CLEAR-RAG evaluation tool. It includes a FastAPI backend, a Next.js frontend, PostgreSQL through Docker Compose, and Phase 2 authentication with role-based access control.
 
-Business features are intentionally not implemented yet.
+CLEAR-RAG evaluation business features are intentionally not implemented yet.
 
 ## Prerequisites
 
@@ -63,6 +63,12 @@ User: clearrag
 Password: clearrag
 ```
 
+The backend uses the SQLAlchemy psycopg v3 driver:
+
+```text
+postgresql+psycopg://clearrag:clearrag@localhost:5432/clearrag
+```
+
 ## Start the Backend
 
 ```powershell
@@ -70,6 +76,7 @@ cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
@@ -87,6 +94,42 @@ Expected response:
   "service": "CLEAR-RAG API",
   "environment": "development"
 }
+```
+
+## Authentication
+
+Phase 2 adds JWT authentication and three base roles:
+
+```text
+admin
+evaluator
+viewer
+```
+
+Run database migrations before using auth endpoints:
+
+```powershell
+cd backend
+alembic upgrade head
+```
+
+The first registered user becomes `admin`. Later registered users become `viewer`.
+
+Available auth endpoints:
+
+```text
+POST /auth/register
+POST /auth/login
+POST /auth/logout
+GET  /auth/me
+GET  /auth/admin-check
+GET  /auth/evaluator-check
+```
+
+Set a strong JWT secret in `backend/.env` before using anything beyond local development:
+
+```text
+JWT_SECRET_KEY=replace-with-a-long-random-secret
 ```
 
 ## Start the Frontend
@@ -109,13 +152,25 @@ http://localhost:3000
 
 ```text
 backend/
+  migrations/
   app/
+    auth.py
     config.py
+    database.py
     main.py
+    models.py
+    schemas.py
+    security.py
+    routers/
   .env.example
+  alembic.ini
   requirements.txt
 frontend/
   app/
+    dashboard/
+    lib/
+    login/
+    register/
     globals.css
     layout.tsx
     page.tsx

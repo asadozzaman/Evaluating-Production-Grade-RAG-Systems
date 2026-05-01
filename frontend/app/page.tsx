@@ -8,8 +8,12 @@ export default function Home() {
         <h1>Project foundation is ready.</h1>
         <p className="summary">
           FastAPI, Next.js, and PostgreSQL are wired for local development.
-          Business features will be added in later iterations.
+          Authentication and role access are ready for Phase 2.
         </p>
+        <div className="actions">
+          <a href="/login">Sign in</a>
+          <a href="/register">Create account</a>
+        </div>
         <div className="status" aria-label="Project foundation status">
           <div className="status-row">
             <span>Frontend</span>
