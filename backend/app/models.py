@@ -158,12 +158,25 @@ class TestQuestion(TimestampMixin, Base):
 
 class EvaluationRun(Base):
     __tablename__ = "evaluation_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'failed')",
+            name="ck_evaluation_runs_status",
+        ),
+        CheckConstraint(
+            "processed_question_count >= 0",
+            name="ck_evaluation_runs_processed_question_count_non_negative",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     system_version: Mapped[str | None] = mapped_column(String(120))
     notes: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(30), default="pending", server_default="pending", nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    processed_question_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

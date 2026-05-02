@@ -73,6 +73,10 @@ h1 {
   margin: 0 0 28px;
 }
 
+.compact-actions {
+  margin: 0;
+}
+
 .actions a,
 button,
 .secondary-button {
@@ -286,6 +290,10 @@ select:focus {
 }
 
 .run-selector {
+  margin-bottom: 16px;
+}
+
+.run-status-panel {
   margin-bottom: 16px;
 }
 

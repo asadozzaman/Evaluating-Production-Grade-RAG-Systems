@@ -7,6 +7,7 @@ import {
   EvaluationRun,
   GeneratedAnswer,
   Project,
+  RagExecutionResult,
   RetrievedChunk,
   SourceDocument,
   TOKEN_STORAGE_KEY,
@@ -28,6 +29,8 @@ export default function RunOutputPage() {
   const [selectedQuestionId, setSelectedQuestionId] = useState("");
   const [chunks, setChunks] = useState<RetrievedChunk[]>([]);
   const [answers, setAnswers] = useState<GeneratedAnswer[]>([]);
+  const [executionResult, setExecutionResult] = useState<RagExecutionResult | null>(null);
+  const [isExecuting, setIsExecuting] = useState(false);
   const [error, setError] = useState("");
 
   const selectedQuestion = useMemo(
@@ -178,6 +181,38 @@ export default function RunOutputPage() {
     }
   }
 
+  async function executeGeminiRag() {
+    setError("");
+    setExecutionResult(null);
+    const token = getToken();
+    if (!token) {
+      return;
+    }
+
+    setIsExecuting(true);
+    try {
+      const result = await authRequest<RagExecutionResult>(
+        `/projects/${projectId}/runs/${runId}/execute`,
+        { method: "POST" },
+        token,
+      );
+      setExecutionResult(result);
+      const refreshedRun = await authRequest<EvaluationRun>(`/projects/${projectId}/runs/${runId}`, { method: "GET" }, token);
+      setRun(refreshedRun);
+      if (selectedQuestionId) {
+        await loadOutputs(selectedQuestionId);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to run Gemini RAG");
+      const refreshedRun = await authRequest<EvaluationRun>(`/projects/${projectId}/runs/${runId}`, { method: "GET" }, token).catch(() => null);
+      if (refreshedRun) {
+        setRun(refreshedRun);
+      }
+    } finally {
+      setIsExecuting(false);
+    }
+  }
+
   if (error && (!project || !run)) {
     return (
       <main>
@@ -215,9 +250,31 @@ export default function RunOutputPage() {
         </div>
 
         <p className="summary">
-          Add retrieved chunks and generated answers for a selected test question. Keep API keys in backend environment files only.
+          Run Gemini RAG automatically, or manually add retrieved chunks and generated answers for inspection.
         </p>
         {error ? <p className="error">{error}</p> : null}
+        {run.last_error ? <p className="error">{run.last_error}</p> : null}
+
+        <div className="status run-status-panel">
+          <div className="status-row">
+            <span>Run status</span>
+            <span>{run.status}</span>
+          </div>
+          <div className="status-row">
+            <span>Processed questions</span>
+            <span>{run.processed_question_count}</span>
+          </div>
+          <div className="actions compact-actions">
+            <button type="button" onClick={executeGeminiRag} disabled={isExecuting || documents.length === 0 || questions.length === 0}>
+              {isExecuting ? "Running Gemini RAG..." : "Run Gemini RAG"}
+            </button>
+          </div>
+          {executionResult ? (
+            <p className="muted">
+              {executionResult.message} {executionResult.retrieved_chunks_created} chunks and {executionResult.generated_answers_created} answers saved with {executionResult.model_name}.
+            </p>
+          ) : null}
+        </div>
 
         <div className="status run-selector">
           <label>

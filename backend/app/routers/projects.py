@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user, require_roles
-from app.config import get_settings
+from app.config import BACKEND_ROOT, get_settings
 from app.database import get_db
 from app.models import EvaluationRun, Project, SourceDocument, TestQuestion, User
 from app.models import GeneratedAnswer, RetrievedChunk
@@ -21,6 +21,7 @@ from app.schemas import (
     ProjectCreate,
     ProjectRead,
     ProjectUpdate,
+    RagExecutionRead,
     RetrievedChunkCreate,
     RetrievedChunkRead,
     SourceDocumentCreate,
@@ -30,6 +31,7 @@ from app.schemas import (
     TestQuestionRead,
     TestQuestionUpdate,
 )
+from app.services.rag_execution import RagExecutionError, execute_rag_run
 
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -143,7 +145,10 @@ def ensure_valid_document_source(document: SourceDocument) -> None:
 
 def get_upload_root() -> Path:
     settings = get_settings()
-    return Path(settings.upload_dir)
+    upload_root = Path(settings.upload_dir)
+    if upload_root.is_absolute():
+        return upload_root
+    return BACKEND_ROOT / upload_root
 
 
 def sanitize_filename(filename: str) -> str:
@@ -494,6 +499,30 @@ def delete_run(
     db.delete(run)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{project_id}/runs/{run_id}/execute", response_model=RagExecutionRead)
+def execute_run(
+    project_id: int,
+    run_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: WritableUser,
+) -> dict[str, object]:
+    get_project_or_404(db, project_id)
+    run = get_run_or_404(db, project_id, run_id)
+    try:
+        result = execute_rag_run(db, run, get_settings())
+    except RagExecutionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    return {
+        "run_id": result.run_id,
+        "status": result.status,
+        "model_name": result.model_name,
+        "processed_questions": result.processed_questions,
+        "retrieved_chunks_created": result.retrieved_chunks_created,
+        "generated_answers_created": result.generated_answers_created,
+        "message": result.message,
+    }
 
 
 @router.post(

@@ -12,10 +12,11 @@ from app.database import Base, get_db
 from app.main import app
 from app.models import EvaluationRun, Role, SourceDocument, TestQuestion as QuestionModel, User
 from app.security import hash_password
+from app.config import get_settings
 
 
 @pytest.fixture()
-def client_and_db() -> Generator[tuple[TestClient, sessionmaker[Session]]]:
+def client_and_db(tmp_path: Path) -> Generator[tuple[TestClient, sessionmaker[Session]]]:
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -23,6 +24,11 @@ def client_and_db() -> Generator[tuple[TestClient, sessionmaker[Session]]]:
     )
     TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     Base.metadata.create_all(bind=engine)
+    from app.config import get_settings
+
+    settings = get_settings()
+    original_upload_dir = settings.upload_dir
+    settings.upload_dir = str(tmp_path / "uploads")
 
     def override_get_db() -> Generator[Session]:
         db = TestingSessionLocal()
@@ -44,9 +50,10 @@ def client_and_db() -> Generator[tuple[TestClient, sessionmaker[Session]]]:
             db.commit()
         yield TestClient(app), TestingSessionLocal
     finally:
+        settings.upload_dir = original_upload_dir
         app.dependency_overrides.clear()
         Base.metadata.drop_all(bind=engine)
-        shutil.rmtree(Path("uploads"), ignore_errors=True)
+        shutil.rmtree(tmp_path / "uploads", ignore_errors=True)
 
 
 def create_user(db_factory: sessionmaker[Session], email: str, role_name: str) -> None:
@@ -173,7 +180,7 @@ def test_project_setup_crud_and_role_access(client_and_db: tuple[TestClient, ses
     assert uploaded_payload["original_file_name"] == "hr-policy.txt"
     assert uploaded_payload["file_size_bytes"] > 0
     assert uploaded_payload["storage_path"].startswith(f"documents/{project_id}/")
-    uploaded_path = Path("uploads") / uploaded_payload["storage_path"]
+    uploaded_path = Path(get_settings().upload_dir) / uploaded_payload["storage_path"]
     assert uploaded_path.is_file()
 
     viewer_upload = client.post(

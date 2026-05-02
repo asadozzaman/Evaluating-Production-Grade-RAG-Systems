@@ -152,6 +152,9 @@ class EvaluationRunRead(EvaluationRunCreate):
 
     id: int
     project_id: int
+    status: Literal["pending", "running", "completed", "failed"]
+    last_error: str | None
+    processed_question_count: int
     created_by_user_id: int
     created_at: datetime
 
@@ -192,3 +195,15 @@ class GeneratedAnswerRead(GeneratedAnswerCreate):
     evaluation_run_id: int
     test_question_id: int
     created_at: datetime
+
+
+class RagExecutionRead(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    run_id: int
+    status: Literal["completed", "failed"]
+    model_name: str
+    processed_questions: int
+    retrieved_chunks_created: int
+    generated_answers_created: int
+    message: str

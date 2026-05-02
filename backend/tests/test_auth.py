@@ -47,6 +47,11 @@ def client() -> Generator[TestClient]:
 
 
 def test_authentication_and_role_access(client: TestClient) -> None:
+    health = client.get("/health")
+    assert health.status_code == 200
+    assert health.json()["llm_provider"] == "gemini"
+    assert "gemini_api_key" not in health.json()
+
     unauthenticated = client.get("/auth/me")
     assert unauthenticated.status_code == 401
 

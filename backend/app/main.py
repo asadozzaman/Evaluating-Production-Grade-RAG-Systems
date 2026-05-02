@@ -1,3 +1,5 @@
+from typing import Any
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -22,9 +24,12 @@ app.include_router(projects.router)
 
 
 @app.get("/health")
-def health_check() -> dict[str, str]:
+def health_check() -> dict[str, Any]:
     return {
         "status": "ok",
         "service": settings.app_name,
         "environment": settings.environment,
+        "llm_provider": settings.llm_provider,
+        "default_llm_model": settings.default_llm_model,
+        "gemini_configured": settings.gemini_configured,
     }

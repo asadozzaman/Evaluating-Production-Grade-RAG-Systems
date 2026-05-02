@@ -62,6 +62,9 @@ export type EvaluationRun = {
   name: string;
   system_version: string | null;
   notes: string | null;
+  status: "pending" | "running" | "completed" | "failed";
+  last_error: string | null;
+  processed_question_count: number;
   created_by_user_id: number;
   created_at: string;
 };
@@ -90,6 +93,16 @@ export type GeneratedAnswer = {
   generation_time_ms: number | null;
   estimated_cost: string | null;
   created_at: string;
+};
+
+export type RagExecutionResult = {
+  run_id: number;
+  status: "completed" | "failed";
+  model_name: string;
+  processed_questions: number;
+  retrieved_chunks_created: number;
+  generated_answers_created: number;
+  message: string;
 };
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";

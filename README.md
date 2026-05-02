@@ -132,6 +132,34 @@ Set a strong JWT secret in `backend/.env` before using anything beyond local dev
 JWT_SECRET_KEY=replace-with-a-long-random-secret
 ```
 
+## Gemini Configuration
+
+The generated answer form stores the model name used for a manual test. Do not paste API keys into the browser. Keep the Gemini key in `backend/.env`:
+
+```text
+LLM_PROVIDER=gemini
+DEFAULT_LLM_MODEL=gemini
+GEMINI_API_KEY=your-rotated-local-key
+```
+
+The health endpoint confirms whether the backend can see a Gemini key without returning the secret:
+
+```text
+http://localhost:8000/health
+```
+
+Expected fields:
+
+```json
+{
+  "llm_provider": "gemini",
+  "default_llm_model": "gemini",
+  "gemini_configured": true
+}
+```
+
+Gemini is called by the Phase 6 run execution endpoint. The manual generated answer form remains available for controlled evaluation data entry.
+
 ## Core Database Models
 
 Phase 3 adds the relational foundation for CLEAR-RAG evaluation data. These models exist in the database layer only; full CRUD APIs and business workflows are intentionally deferred.
@@ -302,6 +330,41 @@ model name
 ```
 
 Phase 5 does not implement CLEAR-RAG scoring, reviewer notes, score calculation, reports, automatic retrieval, embeddings, or LLM-assisted judging.
+
+## Automatic Gemini RAG Execution
+
+Phase 6 adds a basic automatic RAG execution path. Admins and evaluators can run Gemini RAG for an evaluation run:
+
+```text
+POST /projects/{project_id}/runs/{run_id}/execute
+```
+
+The execution currently:
+
+```text
+extracts text from uploaded .txt, .md, .csv, .docx, and .pdf files
+splits document text into simple chunks
+retrieves top chunks with keyword matching
+calls Gemini using GEMINI_API_KEY from backend/.env
+saves retrieved chunks and generated answers
+updates run status as pending, running, completed, or failed
+```
+
+Frontend run page:
+
+```text
+/dashboard/projects/{projectId}/runs/{runId}
+```
+
+Click:
+
+```text
+Run Gemini RAG
+```
+
+This replaces previous retrieved chunks and generated answers for that run. URI-only documents are stored as metadata but are not fetched or parsed yet; upload a readable file when testing automatic RAG.
+
+Phase 6 still uses simple keyword retrieval. Embeddings, vector search, production-grade retriever evaluation, and CLEAR-RAG human scoring are later phases.
 
 ## Start the Frontend
 
