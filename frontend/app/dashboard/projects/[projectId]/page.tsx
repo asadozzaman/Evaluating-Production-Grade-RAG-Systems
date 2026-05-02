@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import type { ReactNode } from "react";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import {
+  DocumentIndexResult,
   EvaluationRun,
   Project,
   SourceDocument,
@@ -31,7 +32,9 @@ export default function ProjectDetailPage() {
   const [questions, setQuestions] = useState<TestQuestion[]>([]);
   const [runs, setRuns] = useState<EvaluationRun[]>([]);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [documentSourceMode, setDocumentSourceMode] = useState<"uri" | "file">("uri");
+  const [indexingDocumentId, setIndexingDocumentId] = useState<number | null>(null);
 
   const getToken = useCallback(() => {
     const token = localStorage.getItem(TOKEN_STORAGE_KEY);
@@ -71,6 +74,7 @@ export default function ProjectDetailPage() {
   async function submitDocument(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
+    setNotice("");
     const token = getToken();
     if (!token) {
       return;
@@ -113,6 +117,29 @@ export default function ProjectDetailPage() {
       loadProject();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to save document");
+    }
+  }
+
+  async function indexDocument(documentId: number) {
+    setError("");
+    setNotice("");
+    const token = getToken();
+    if (!token) {
+      return;
+    }
+
+    setIndexingDocumentId(documentId);
+    try {
+      const result = await authRequest<DocumentIndexResult>(
+        `/projects/${projectId}/documents/${documentId}/index`,
+        { method: "POST" },
+        token,
+      );
+      setNotice(`${result.message} ${result.chunks_indexed} chunks saved with ${result.embedding_model}.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to index document");
+    } finally {
+      setIndexingDocumentId(null);
     }
   }
 
@@ -214,6 +241,7 @@ export default function ProjectDetailPage() {
           {project.system_type} for {project.target_users}
         </p>
         {error ? <p className="error">{error}</p> : null}
+        {notice ? <p className="success">{notice}</p> : null}
 
         <div className="setup-grid">
           <SetupSection title="Documents" count={documents.length}>
@@ -262,6 +290,9 @@ export default function ProjectDetailPage() {
                 ]
                   .filter(Boolean)
                   .join(" · "),
+                actionLabel: indexingDocumentId === document.id ? "Indexing..." : "Index for vector search",
+                actionDisabled: indexingDocumentId !== null || document.source_kind !== "file",
+                onAction: () => indexDocument(document.id),
               }))}
             />
           </SetupSection>
@@ -331,7 +362,14 @@ function SetupSection({
 function SetupList({
   items,
 }: Readonly<{
-  items: Array<{ title: string; meta: string; href?: string }>;
+  items: Array<{
+    title: string;
+    meta: string;
+    href?: string;
+    actionLabel?: string;
+    actionDisabled?: boolean;
+    onAction?: () => void;
+  }>;
 }>) {
   if (items.length === 0) {
     return <p className="muted">Nothing added yet.</p>;
@@ -343,6 +381,11 @@ function SetupList({
         <div className="mini-list-item" key={`${item.title}-${index}`}>
           <strong>{item.title}</strong>
           <span>{item.meta}</span>
+          {item.onAction ? (
+            <button type="button" onClick={item.onAction} disabled={item.actionDisabled}>
+              {item.actionLabel}
+            </button>
+          ) : null}
           {item.href ? <Link href={item.href}>Open run</Link> : null}
         </div>
       ))}

@@ -139,6 +139,7 @@ The generated answer form stores the model name used for a manual test. Do not p
 ```text
 LLM_PROVIDER=gemini
 DEFAULT_LLM_MODEL=gemini
+DEFAULT_EMBEDDING_MODEL=gemini-embedding-001
 GEMINI_API_KEY=your-rotated-local-key
 ```
 
@@ -437,6 +438,48 @@ weakest dimension
 question-level results
 CSV and JSON export buttons
 ```
+
+## Document Indexing and Vector Retrieval
+
+Phase 9 adds an embedding-backed retrieval path while keeping keyword retrieval available.
+
+Index a file-based source document:
+
+```text
+POST /projects/{project_id}/documents/{document_id}/index
+```
+
+Read indexed chunks:
+
+```text
+GET /projects/{project_id}/documents/{document_id}/chunks
+```
+
+Run Gemini RAG with vector retrieval:
+
+```text
+POST /projects/{project_id}/runs/{run_id}/execute
+```
+
+Request body:
+
+```json
+{
+  "retrieval_mode": "vector"
+}
+```
+
+The frontend flow is:
+
+```text
+1. Upload a readable .txt, .md, .csv, .docx, or .pdf document.
+2. Click Index for vector search on the project setup page.
+3. Open a run.
+4. Select Vector embeddings as the retrieval mode.
+5. Click Run Gemini RAG.
+```
+
+Embeddings are stored in PostgreSQL as persistent document chunks, and retrieval uses cosine similarity in the backend. The current Docker service remains the standard PostgreSQL image; pgvector can be added later as a production hardening step.
 
 ## Start the Frontend
 

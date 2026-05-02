@@ -46,6 +46,7 @@ class MessageResponse(BaseModel):
 QuestionType = Literal["simple_factual", "conditional", "multi_document", "ambiguous", "edge_case"]
 SourceKind = Literal["uri", "file"]
 RelevanceLabel = Literal["high", "medium", "low", "irrelevant"]
+RetrievalMode = Literal["keyword", "vector"]
 
 
 class ProjectCreate(BaseModel):
@@ -111,6 +112,26 @@ class SourceDocumentRead(BaseModel):
     storage_path: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class DocumentChunkRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    source_document_id: int
+    chunk_index: int
+    chunk_text: str
+    section_reference: str | None
+    embedding_model: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class DocumentIndexRead(BaseModel):
+    document_id: int
+    chunks_indexed: int
+    embedding_model: str
+    message: str
 
 
 class TestQuestionCreate(BaseModel):
@@ -206,7 +227,12 @@ class RagExecutionRead(BaseModel):
     processed_questions: int
     retrieved_chunks_created: int
     generated_answers_created: int
+    retrieval_mode: RetrievalMode
     message: str
+
+
+class RagExecutionRequest(BaseModel):
+    retrieval_mode: RetrievalMode = "keyword"
 
 
 class EvaluationRecordCreate(BaseModel):

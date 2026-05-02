@@ -333,6 +333,7 @@ def test_execute_rag_run_with_uploaded_text_and_mocked_gemini(
     assert payload["processed_questions"] == 1
     assert payload["retrieved_chunks_created"] >= 1
     assert payload["generated_answers_created"] == 1
+    assert payload["retrieval_mode"] == "keyword"
 
     run = client.get(
         f"/projects/{project['project_id']}/runs/{project['run_id']}",
@@ -354,6 +355,90 @@ def test_execute_rag_run_with_uploaded_text_and_mocked_gemini(
     )
     assert answers.status_code == 200
     assert answers.json()[0]["model_name"] == "gemini-test"
+
+
+def test_document_indexing_and_vector_rag_with_mocked_gemini(
+    client_and_db: tuple[TestClient, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeGeminiClient:
+        def __init__(self, settings: object) -> None:
+            self.settings = settings
+
+        def embed_text(self, text: str) -> list[float]:
+            lowered = text.lower()
+            if "annual leave" in lowered or "leave days" in lowered:
+                return [1.0, 0.0, 0.0]
+            return [0.0, 1.0, 0.0]
+
+        def generate_answer(self, prompt: str) -> GeminiAnswer:
+            assert "Employees receive 22 annual leave days" in prompt
+            return GeminiAnswer(
+                text="Employees receive 22 annual leave days after one year of service. [1]",
+                model_name="gemini-test",
+                input_tokens=90,
+                output_tokens=15,
+                generation_time_ms=30,
+            )
+
+    monkeypatch.setattr("app.services.vector_index.GeminiClient", FakeGeminiClient)
+    monkeypatch.setattr("app.services.rag_execution.GeminiClient", FakeGeminiClient)
+
+    client, db_factory = client_and_db
+    create_user(db_factory, "admin@example.com", "admin")
+    create_user(db_factory, "viewer@example.com", "viewer")
+    admin_token = login(client, "admin@example.com")
+    viewer_token = login(client, "viewer@example.com")
+    project = create_setup_graph(client, admin_token, "Vector Gemini RAG")
+
+    uploaded_document = client.post(
+        f"/projects/{project['project_id']}/documents/upload",
+        data={"title": "Vector HR Policy", "document_type": "policy", "version": "v1"},
+        files={
+            "file": (
+                "vector-hr-policy.txt",
+                b"Employees receive 22 annual leave days after completing one year of service.",
+                "text/plain",
+            )
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert uploaded_document.status_code == 201, uploaded_document.text
+    document_id = uploaded_document.json()["id"]
+
+    viewer_index = client.post(
+        f"/projects/{project['project_id']}/documents/{document_id}/index",
+        headers=auth_headers(viewer_token),
+    )
+    assert viewer_index.status_code == 403
+
+    indexed = client.post(
+        f"/projects/{project['project_id']}/documents/{document_id}/index",
+        headers=auth_headers(admin_token),
+    )
+    assert indexed.status_code == 200, indexed.text
+    assert indexed.json()["chunks_indexed"] == 1
+    assert indexed.json()["embedding_model"] == "gemini-embedding-001"
+
+    chunks = client.get(
+        f"/projects/{project['project_id']}/documents/{document_id}/chunks",
+        headers=auth_headers(viewer_token),
+    )
+    assert chunks.status_code == 200, chunks.text
+    assert len(chunks.json()) == 1
+    assert chunks.json()[0]["embedding_model"] == "gemini-embedding-001"
+
+    executed = client.post(
+        f"/projects/{project['project_id']}/runs/{project['run_id']}/execute",
+        json={"retrieval_mode": "vector"},
+        headers=auth_headers(admin_token),
+    )
+    assert executed.status_code == 200, executed.text
+    payload = executed.json()
+    assert payload["status"] == "completed"
+    assert payload["retrieval_mode"] == "vector"
+    assert payload["retrieved_chunks_created"] == 1
+    assert payload["generated_answers_created"] == 1
 
 
 def test_clear_rag_evaluation_scoring_and_role_access(

@@ -14,9 +14,11 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user, require_roles
 from app.config import BACKEND_ROOT, get_settings
 from app.database import get_db
-from app.models import EvaluationRecord, EvaluationRun, Project, SourceDocument, TestQuestion, User
+from app.models import DocumentChunk, EvaluationRecord, EvaluationRun, Project, SourceDocument, TestQuestion, User
 from app.models import GeneratedAnswer, RetrievedChunk
 from app.schemas import (
+    DocumentChunkRead,
+    DocumentIndexRead,
     EvaluationRecordCreate,
     EvaluationRecordRead,
     EvaluationRecordUpdate,
@@ -29,6 +31,7 @@ from app.schemas import (
     ProjectRead,
     ProjectUpdate,
     ProjectSummaryRead,
+    RagExecutionRequest,
     RagExecutionRead,
     RetrievedChunkCreate,
     RetrievedChunkRead,
@@ -41,6 +44,7 @@ from app.schemas import (
     TestQuestionUpdate,
 )
 from app.services.rag_execution import RagExecutionError, execute_rag_run
+from app.services.vector_index import index_source_document
 
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -552,6 +556,48 @@ def delete_document(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.post("/{project_id}/documents/{document_id}/index", response_model=DocumentIndexRead)
+def index_document(
+    project_id: int,
+    document_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: WritableUser,
+) -> dict[str, object]:
+    get_project_or_404(db, project_id)
+    document = get_document_or_404(db, project_id, document_id)
+    try:
+        result = index_source_document(db, document, get_settings())
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    return {
+        "document_id": result.document_id,
+        "chunks_indexed": result.chunks_indexed,
+        "embedding_model": result.embedding_model,
+        "message": result.message,
+    }
+
+
+@router.get("/{project_id}/documents/{document_id}/chunks", response_model=list[DocumentChunkRead])
+def list_document_chunks(
+    project_id: int,
+    document_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> list[DocumentChunk]:
+    get_project_or_404(db, project_id)
+    get_document_or_404(db, project_id, document_id)
+    return list(
+        db.scalars(
+            select(DocumentChunk)
+            .where(DocumentChunk.source_document_id == document_id)
+            .order_by(DocumentChunk.chunk_index.asc(), DocumentChunk.id.asc())
+        ).all()
+    )
+
+
 @router.post("/{project_id}/questions", response_model=TestQuestionRead, status_code=status.HTTP_201_CREATED)
 def create_question(
     project_id: int,
@@ -778,11 +824,13 @@ def execute_run(
     run_id: int,
     db: Annotated[Session, Depends(get_db)],
     _: WritableUser,
+    payload: RagExecutionRequest | None = None,
 ) -> dict[str, object]:
     get_project_or_404(db, project_id)
     run = get_run_or_404(db, project_id, run_id)
+    retrieval_mode = payload.retrieval_mode if payload else "keyword"
     try:
-        result = execute_rag_run(db, run, get_settings())
+        result = execute_rag_run(db, run, get_settings(), retrieval_mode=retrieval_mode)
     except RagExecutionError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     return {
@@ -792,6 +840,7 @@ def execute_run(
         "processed_questions": result.processed_questions,
         "retrieved_chunks_created": result.retrieved_chunks_created,
         "generated_answers_created": result.generated_answers_created,
+        "retrieval_mode": result.retrieval_mode,
         "message": result.message,
     }
 

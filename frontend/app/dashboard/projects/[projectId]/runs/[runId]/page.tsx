@@ -20,6 +20,10 @@ import {
 
 const relevanceLabels = ["high", "medium", "low", "irrelevant"];
 const scoreOptions = [1, 2, 3, 4, 5];
+const retrievalModes = [
+  { value: "keyword", label: "Keyword matching" },
+  { value: "vector", label: "Vector embeddings" },
+] as const;
 const dimensionLabels: Array<[keyof RunSummary["dimension_averages"], string]> = [
   ["citation_quality_score", "Citation Quality"],
   ["latency_cost_score", "Latency and Cost"],
@@ -43,6 +47,7 @@ export default function RunOutputPage() {
   const [evaluations, setEvaluations] = useState<EvaluationRecord[]>([]);
   const [summary, setSummary] = useState<RunSummary | null>(null);
   const [executionResult, setExecutionResult] = useState<RagExecutionResult | null>(null);
+  const [retrievalMode, setRetrievalMode] = useState<"keyword" | "vector">("keyword");
   const [isExecuting, setIsExecuting] = useState(false);
   const [error, setError] = useState("");
 
@@ -227,7 +232,10 @@ export default function RunOutputPage() {
     try {
       const result = await authRequest<RagExecutionResult>(
         `/projects/${projectId}/runs/${runId}/execute`,
-        { method: "POST" },
+        {
+          method: "POST",
+          body: JSON.stringify({ retrieval_mode: retrievalMode }),
+        },
         token,
       );
       setExecutionResult(result);
@@ -362,6 +370,19 @@ export default function RunOutputPage() {
             <span>Processed questions</span>
             <span>{run.processed_question_count}</span>
           </div>
+          <label>
+            Retrieval mode
+            <select
+              value={retrievalMode}
+              onChange={(event) => setRetrievalMode(event.target.value as "keyword" | "vector")}
+            >
+              {retrievalModes.map((mode) => (
+                <option key={mode.value} value={mode.value}>
+                  {mode.label}
+                </option>
+              ))}
+            </select>
+          </label>
           <div className="actions compact-actions">
             <button type="button" onClick={executeGeminiRag} disabled={isExecuting || documents.length === 0 || questions.length === 0}>
               {isExecuting ? "Running Gemini RAG..." : "Run Gemini RAG"}

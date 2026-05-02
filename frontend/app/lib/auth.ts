@@ -45,6 +45,13 @@ export type SourceDocument = {
   updated_at: string;
 };
 
+export type DocumentIndexResult = {
+  document_id: number;
+  chunks_indexed: number;
+  embedding_model: string;
+  message: string;
+};
+
 export type TestQuestion = {
   id: number;
   project_id: number;
@@ -120,6 +127,7 @@ export type RagExecutionResult = {
   processed_questions: number;
   retrieved_chunks_created: number;
   generated_answers_created: number;
+  retrieval_mode: "keyword" | "vector";
   message: string;
 };
 

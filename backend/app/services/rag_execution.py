@@ -9,6 +9,7 @@ from app.models import EvaluationRun, GeneratedAnswer, RetrievedChunk, SourceDoc
 from app.services.document_processing import DocumentChunk, chunk_document, extract_document_text
 from app.services.gemini import GeminiAnswer, GeminiClient
 from app.services.retrieval import retrieve_top_chunks
+from app.services.vector_index import list_indexed_chunks, retrieve_vector_chunks
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class RagExecutionResult:
     processed_questions: int
     retrieved_chunks_created: int
     generated_answers_created: int
+    retrieval_mode: str
     message: str
 
 
@@ -34,6 +36,7 @@ def execute_rag_run(
     run: EvaluationRun,
     settings: Settings,
     gemini_client: GeminiClient | None = None,
+    retrieval_mode: str = "keyword",
 ) -> RagExecutionResult:
     questions = list(
         db.scalars(
@@ -55,9 +58,15 @@ def execute_rag_run(
     if not documents:
         raise RagExecutionError("Upload at least one source document before running Gemini RAG.")
 
-    all_chunks = build_chunks(documents)
-    if not all_chunks:
+    if retrieval_mode not in {"keyword", "vector"}:
+        raise RagExecutionError("retrieval_mode must be keyword or vector.")
+
+    all_chunks = build_chunks(documents) if retrieval_mode == "keyword" else []
+    indexed_chunks = list_indexed_chunks(db, run.project_id) if retrieval_mode == "vector" else []
+    if retrieval_mode == "keyword" and not all_chunks:
         raise RagExecutionError("No extractable document text found. Upload a .txt, .md, .csv, .docx, or .pdf file with readable text.")
+    if retrieval_mode == "vector" and not indexed_chunks:
+        raise RagExecutionError("Index at least one source document before running vector retrieval.")
 
     client = gemini_client or GeminiClient(settings)
     run.status = "running"
@@ -71,7 +80,11 @@ def execute_rag_run(
 
     try:
         for question in questions:
-            selected_chunks, retrieval_time_ms = retrieve_top_chunks(question.question_text, all_chunks)
+            if retrieval_mode == "vector":
+                question_embedding = client.embed_text(question.question_text)
+                selected_chunks, retrieval_time_ms = retrieve_vector_chunks(question_embedding, indexed_chunks)
+            else:
+                selected_chunks, retrieval_time_ms = retrieve_top_chunks(question.question_text, all_chunks)
             saved_chunks = save_retrieved_chunks(db, run.id, question.id, selected_chunks, retrieval_time_ms)
             retrieved_count += len(saved_chunks)
 
@@ -100,7 +113,8 @@ def execute_rag_run(
         processed_questions=run.processed_question_count,
         retrieved_chunks_created=retrieved_count,
         generated_answers_created=answer_count,
-        message="Gemini RAG execution completed.",
+        retrieval_mode=retrieval_mode,
+        message=f"Gemini RAG execution completed with {retrieval_mode} retrieval.",
     )
 
 

@@ -65,6 +65,32 @@ class GeminiClient:
             generation_time_ms=generation_time_ms,
         )
 
+    def embed_text(self, text: str) -> list[float]:
+        api_key = normalize_secret(self.settings.gemini_api_key)
+        if not api_key:
+            raise RuntimeError("Gemini API key is missing. Set GEMINI_API_KEY in backend/.env and restart the backend.")
+
+        model_name = normalize_model_name(self.settings.default_embedding_model)
+        url = f"{self.settings.gemini_api_base_url.rstrip('/')}/models/{model_name}:embedContent"
+        payload = {
+            "model": f"models/{model_name}",
+            "content": {"parts": [{"text": text}]},
+        }
+
+        response = httpx.post(
+            url,
+            headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+            json=payload,
+            timeout=45,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(f"Gemini embedding request failed with status {response.status_code}: {safe_error_text(response)}")
+
+        values = response.json().get("embedding", {}).get("values", [])
+        if not values:
+            raise RuntimeError("Gemini returned an empty embedding.")
+        return [float(value) for value in values]
+
 
 def normalize_model_name(model_name: str) -> str:
     stripped = model_name.strip()

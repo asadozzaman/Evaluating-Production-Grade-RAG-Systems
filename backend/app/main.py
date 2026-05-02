@@ -31,5 +31,6 @@ def health_check() -> dict[str, Any]:
         "environment": settings.environment,
         "llm_provider": settings.llm_provider,
         "default_llm_model": settings.default_llm_model,
+        "default_embedding_model": settings.default_embedding_model,
         "gemini_configured": settings.gemini_configured,
     }

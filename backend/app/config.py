@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     upload_dir: str = "uploads"
     llm_provider: str = "gemini"
     default_llm_model: str = "gemini-2.5-flash"
+    default_embedding_model: str = "gemini-embedding-001"
     gemini_api_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     gemini_api_key: str | None = None
 

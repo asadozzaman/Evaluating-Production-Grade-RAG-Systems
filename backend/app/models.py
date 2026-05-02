@@ -131,6 +131,31 @@ class SourceDocument(TimestampMixin, Base):
 
     project: Mapped[Project] = relationship(back_populates="source_documents")
     retrieved_chunks: Mapped[list["RetrievedChunk"]] = relationship(back_populates="source_document")
+    document_chunks: Mapped[list["DocumentChunk"]] = relationship(
+        back_populates="source_document",
+        cascade="all, delete-orphan",
+    )
+
+
+class DocumentChunk(TimestampMixin, Base):
+    __tablename__ = "document_chunks"
+    __table_args__ = (
+        CheckConstraint("chunk_index > 0", name="ck_document_chunks_chunk_index_positive"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    source_document_id: Mapped[int] = mapped_column(
+        ForeignKey("source_documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
+    section_reference: Mapped[str | None] = mapped_column(String(255))
+    embedding_model: Mapped[str] = mapped_column(String(120), nullable=False)
+    embedding_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+    source_document: Mapped[SourceDocument] = relationship(back_populates="document_chunks")
 
 
 class TestQuestion(TimestampMixin, Base):
