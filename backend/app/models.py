@@ -92,6 +92,10 @@ class Project(TimestampMixin, Base):
         back_populates="project",
         cascade="all, delete-orphan",
     )
+    question_datasets: Mapped[list["QuestionDataset"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
     evaluation_runs: Mapped[list["EvaluationRun"]] = relationship(
         back_populates="project",
         cascade="all, delete-orphan",
@@ -158,6 +162,25 @@ class DocumentChunk(TimestampMixin, Base):
     source_document: Mapped[SourceDocument] = relationship(back_populates="document_chunks")
 
 
+class QuestionDataset(TimestampMixin, Base):
+    __tablename__ = "question_datasets"
+    __table_args__ = (
+        CheckConstraint("question_count >= 0", name="ck_question_datasets_question_count_non_negative"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    dataset_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    dataset_version: Mapped[str | None] = mapped_column(String(80))
+    imported_file_name: Mapped[str | None] = mapped_column(String(255))
+    question_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+
+    project: Mapped[Project] = relationship(back_populates="question_datasets")
+    created_by: Mapped[User] = relationship(foreign_keys=[created_by_user_id])
+    test_questions: Mapped[list["TestQuestion"]] = relationship(back_populates="dataset")
+
+
 class TestQuestion(TimestampMixin, Base):
     __tablename__ = "test_questions"
     __table_args__ = (
@@ -172,9 +195,11 @@ class TestQuestion(TimestampMixin, Base):
     question_text: Mapped[str] = mapped_column(Text, nullable=False)
     question_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     expected_source: Mapped[str | None] = mapped_column(String(255))
+    dataset_id: Mapped[int | None] = mapped_column(ForeignKey("question_datasets.id", ondelete="SET NULL"), index=True)
     created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="test_questions")
+    dataset: Mapped[QuestionDataset | None] = relationship(back_populates="test_questions")
     created_by: Mapped[User] = relationship(foreign_keys=[created_by_user_id])
     retrieved_chunks: Mapped[list["RetrievedChunk"]] = relationship(back_populates="test_question")
     generated_answers: Mapped[list["GeneratedAnswer"]] = relationship(back_populates="test_question")

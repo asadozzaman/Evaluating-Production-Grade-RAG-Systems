@@ -8,6 +8,8 @@ import {
   DocumentIndexResult,
   EvaluationRun,
   Project,
+  QuestionDataset,
+  QuestionImportResult,
   RunComparison,
   SourceDocument,
   TOKEN_STORAGE_KEY,
@@ -31,6 +33,7 @@ export default function ProjectDetailPage() {
   const [project, setProject] = useState<Project | null>(null);
   const [documents, setDocuments] = useState<SourceDocument[]>([]);
   const [questions, setQuestions] = useState<TestQuestion[]>([]);
+  const [questionDatasets, setQuestionDatasets] = useState<QuestionDataset[]>([]);
   const [runs, setRuns] = useState<EvaluationRun[]>([]);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -39,6 +42,7 @@ export default function ProjectDetailPage() {
   const [selectedRunIds, setSelectedRunIds] = useState<number[]>([]);
   const [comparison, setComparison] = useState<RunComparison | null>(null);
   const [isComparing, setIsComparing] = useState(false);
+  const [isImportingQuestions, setIsImportingQuestions] = useState(false);
 
   const getToken = useCallback(() => {
     const token = localStorage.getItem(TOKEN_STORAGE_KEY);
@@ -56,15 +60,17 @@ export default function ProjectDetailPage() {
     }
 
     try {
-      const [projectData, documentData, questionData, runData] = await Promise.all([
+      const [projectData, documentData, questionData, datasetData, runData] = await Promise.all([
         authRequest<Project>(`/projects/${projectId}`, { method: "GET" }, token),
         authRequest<SourceDocument[]>(`/projects/${projectId}/documents`, { method: "GET" }, token),
         authRequest<TestQuestion[]>(`/projects/${projectId}/questions`, { method: "GET" }, token),
+        authRequest<QuestionDataset[]>(`/projects/${projectId}/question-datasets`, { method: "GET" }, token),
         authRequest<EvaluationRun[]>(`/projects/${projectId}/runs`, { method: "GET" }, token),
       ]);
       setProject(projectData);
       setDocuments(documentData);
       setQuestions(questionData);
+      setQuestionDatasets(datasetData);
       setRuns(runData);
       setSelectedRunIds((current) => {
         if (current.length > 0) {
@@ -179,6 +185,47 @@ export default function ProjectDetailPage() {
       loadProject();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to save question");
+    }
+  }
+
+  async function importQuestions(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    setNotice("");
+    const token = getToken();
+    if (!token) {
+      return;
+    }
+
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    const uploadData = new FormData();
+    uploadData.set("dataset_name", String(formData.get("datasetName") ?? ""));
+    const datasetVersion = String(formData.get("datasetVersion") ?? "");
+    if (datasetVersion) {
+      uploadData.set("dataset_version", datasetVersion);
+    }
+    const file = formData.get("questionFile");
+    if (file instanceof File) {
+      uploadData.set("file", file);
+    }
+
+    setIsImportingQuestions(true);
+    try {
+      const result = await uploadRequest<QuestionImportResult>(
+        `/projects/${projectId}/question-datasets/import`,
+        uploadData,
+        token,
+      );
+      setNotice(
+        `Imported ${result.questions_imported} questions. Duplicates: ${result.duplicate_questions}. Invalid rows: ${result.invalid_rows}.`,
+      );
+      form.reset();
+      await loadProject();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to import questions");
+    } finally {
+      setIsImportingQuestions(false);
     }
   }
 
@@ -347,6 +394,26 @@ export default function ProjectDetailPage() {
           </SetupSection>
 
           <SetupSection title="Questions" count={questions.length}>
+            <form className="compact-form" onSubmit={importQuestions}>
+              <input name="datasetName" placeholder="Dataset name" required />
+              <input name="datasetVersion" placeholder="Dataset version" />
+              <input name="questionFile" type="file" accept=".csv,.json" required />
+              <button type="submit" disabled={isImportingQuestions}>
+                {isImportingQuestions ? "Importing questions..." : "Import question set"}
+              </button>
+            </form>
+            <SetupList
+              items={questionDatasets.map((dataset) => ({
+                title: dataset.dataset_name,
+                meta: [
+                  dataset.dataset_version,
+                  `${dataset.question_count} questions`,
+                  dataset.imported_file_name,
+                ]
+                  .filter(Boolean)
+                  .join(" / "),
+              }))}
+            />
             <form className="compact-form" onSubmit={submitQuestion}>
               <textarea name="questionText" placeholder="Question text" rows={3} required />
               <select name="questionType" required defaultValue="simple_factual">

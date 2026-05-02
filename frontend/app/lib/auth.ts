@@ -58,9 +58,33 @@ export type TestQuestion = {
   question_text: string;
   question_type: string;
   expected_source: string | null;
+  dataset_id: number | null;
   created_by_user_id: number;
   created_at: string;
   updated_at: string;
+};
+
+export type QuestionDataset = {
+  id: number;
+  project_id: number;
+  dataset_name: string;
+  dataset_version: string | null;
+  imported_file_name: string | null;
+  question_count: number;
+  created_by_user_id: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type QuestionImportResult = {
+  dataset: QuestionDataset;
+  questions_imported: number;
+  duplicate_questions: number;
+  invalid_rows: number;
+  errors: Array<{
+    row_number: number;
+    message: string;
+  }>;
 };
 
 export type EvaluationRun = {

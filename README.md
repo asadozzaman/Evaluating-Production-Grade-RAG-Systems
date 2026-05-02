@@ -560,6 +560,75 @@ embedding_model_name
 judge_model_name
 ```
 
+## Dataset Import and Batch Evaluation
+
+Phase 12 adds repeatable question dataset imports so larger evaluation sets do not need to be entered one question at a time.
+
+Import CSV or JSON questions:
+
+```text
+POST /projects/{project_id}/question-datasets/import
+```
+
+Multipart form fields:
+
+```text
+dataset_name
+dataset_version
+file
+```
+
+CSV format:
+
+```csv
+question_text,question_type,expected_source
+How many annual leave days are provided?,simple_factual,HR Leave Policy
+When is a medical certificate required?,conditional,HR Leave Policy
+How much leave can be carried forward?,simple_factual,HR Leave Policy
+```
+
+JSON format:
+
+```json
+{
+  "questions": [
+    {
+      "question_text": "How many annual leave days are provided?",
+      "question_type": "simple_factual",
+      "expected_source": "HR Leave Policy"
+    }
+  ]
+}
+```
+
+Supported question types:
+
+```text
+simple_factual
+conditional
+multi_document
+ambiguous
+edge_case
+```
+
+List imported datasets:
+
+```text
+GET /projects/{project_id}/question-datasets
+```
+
+The import response reports:
+
+```text
+questions_imported
+duplicate_questions
+invalid_rows
+row-level errors
+dataset metadata
+```
+
+The frontend project page now includes a question-set import form in the Questions section. After import, create or open a run and use the existing Gemini RAG and automated CLEAR-RAG evaluation buttons to process the full batch.
+
 ## Start the Frontend
 
 In a separate terminal:

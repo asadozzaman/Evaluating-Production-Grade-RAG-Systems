@@ -819,3 +819,89 @@ def test_run_comparison_summarizes_experiment_deltas(
         headers=auth_headers(admin_token),
     )
     assert missing_compare.status_code == 404
+
+
+def test_question_dataset_import_csv_json_validation_and_role_access(
+    client_and_db: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, db_factory = client_and_db
+    create_user(db_factory, "admin@example.com", "admin")
+    create_user(db_factory, "viewer@example.com", "viewer")
+    admin_token = login(client, "admin@example.com")
+    viewer_token = login(client, "viewer@example.com")
+    graph = create_setup_graph(client, admin_token, "Question Dataset Import")
+
+    csv_content = (
+        "question_text,question_type,expected_source\n"
+        "How many annual leave days does an employee receive after one year?,simple_factual,HR Leave Policy\n"
+        "When is a medical certificate required?,conditional,HR Leave Policy\n"
+        "When is a medical certificate required?,conditional,HR Leave Policy\n"
+        "Which policy is invalid?,wrong_type,HR Leave Policy\n"
+        ",simple_factual,HR Leave Policy\n"
+    )
+
+    viewer_import = client.post(
+        f"/projects/{graph['project_id']}/question-datasets/import",
+        data={"dataset_name": "Viewer Import", "dataset_version": "v1"},
+        files={"file": ("questions.csv", csv_content.encode("utf-8"), "text/csv")},
+        headers=auth_headers(viewer_token),
+    )
+    assert viewer_import.status_code == 403
+
+    imported = client.post(
+        f"/projects/{graph['project_id']}/question-datasets/import",
+        data={"dataset_name": "HR Regression Set", "dataset_version": "v1"},
+        files={"file": ("questions.csv", csv_content.encode("utf-8"), "text/csv")},
+        headers=auth_headers(admin_token),
+    )
+    assert imported.status_code == 201, imported.text
+    payload = imported.json()
+    assert payload["dataset"]["dataset_name"] == "HR Regression Set"
+    assert payload["dataset"]["question_count"] == 1
+    assert payload["questions_imported"] == 1
+    assert payload["duplicate_questions"] == 2
+    assert payload["invalid_rows"] == 2
+    assert payload["errors"][0]["row_number"] == 5
+
+    datasets = client.get(
+        f"/projects/{graph['project_id']}/question-datasets",
+        headers=auth_headers(viewer_token),
+    )
+    assert datasets.status_code == 200, datasets.text
+    assert len(datasets.json()) == 1
+    assert datasets.json()[0]["question_count"] == 1
+
+    questions = client.get(
+        f"/projects/{graph['project_id']}/questions",
+        headers=auth_headers(viewer_token),
+    )
+    assert questions.status_code == 200, questions.text
+    imported_questions = [question for question in questions.json() if question["dataset_id"] == payload["dataset"]["id"]]
+    assert len(imported_questions) == 1
+    assert imported_questions[0]["question_text"] == "When is a medical certificate required?"
+
+    json_content = b'{"questions":[{"question_text":"How much annual leave can be carried forward?","question_type":"simple_factual","expected_source":"HR Leave Policy"}]}'
+    json_import = client.post(
+        f"/projects/{graph['project_id']}/question-datasets/import",
+        data={"dataset_name": "HR JSON Set", "dataset_version": "v2"},
+        files={"file": ("questions.json", json_content, "application/json")},
+        headers=auth_headers(admin_token),
+    )
+    assert json_import.status_code == 201, json_import.text
+    assert json_import.json()["questions_imported"] == 1
+
+    unsupported = client.post(
+        f"/projects/{graph['project_id']}/question-datasets/import",
+        data={"dataset_name": "Bad Set"},
+        files={"file": ("questions.txt", b"question", "text/plain")},
+        headers=auth_headers(admin_token),
+    )
+    assert unsupported.status_code == 422
+
+    missing_columns = client.post(
+        f"/projects/{graph['project_id']}/question-datasets/import",
+        data={"dataset_name": "Missing Columns"},
+        files={"file": ("bad.csv", b"question_text\nOnly one column", "text/csv")},
+        headers=auth_headers(admin_token),
+    )
+    assert missing_columns.status_code == 422

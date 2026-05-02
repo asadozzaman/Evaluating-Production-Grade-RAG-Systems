@@ -1,6 +1,7 @@
 import re
 import csv
 import io
+import json
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Annotated
@@ -14,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user, require_roles
 from app.config import BACKEND_ROOT, get_settings
 from app.database import get_db
-from app.models import DocumentChunk, EvaluationRecord, EvaluationRun, Project, SourceDocument, TestQuestion, User
+from app.models import DocumentChunk, EvaluationRecord, EvaluationRun, Project, QuestionDataset, SourceDocument, TestQuestion, User
 from app.models import GeneratedAnswer, RetrievedChunk
 from app.schemas import (
     AutoEvaluationRunRead,
@@ -32,6 +33,8 @@ from app.schemas import (
     ProjectRead,
     ProjectUpdate,
     ProjectSummaryRead,
+    QuestionDatasetRead,
+    QuestionImportRead,
     RagExecutionRequest,
     RagExecutionRead,
     RunComparisonRead,
@@ -56,6 +59,9 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 WritableUser = Annotated[User, Depends(require_roles(["admin", "evaluator"]))]
 AuthenticatedUser = Annotated[User, Depends(get_current_user)]
 ALLOWED_UPLOAD_EXTENSIONS = {".pdf", ".docx", ".txt", ".csv", ".md"}
+ALLOWED_QUESTION_IMPORT_EXTENSIONS = {".csv", ".json"}
+QUESTION_TYPES = {"simple_factual", "conditional", "multi_document", "ambiguous", "edge_case"}
+QUESTION_IMPORT_REQUIRED_COLUMNS = {"question_text", "question_type"}
 SCORE_FIELDS = [
     "citation_quality_score",
     "latency_cost_score",
@@ -454,6 +460,67 @@ def sanitize_filename(filename: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", path_name).strip("._") or "uploaded-document"
 
 
+def normalize_question_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip().lower()
+
+
+def validate_question_import_file(file: UploadFile) -> str:
+    if not file.filename:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Uploaded import file must have a filename")
+    safe_name = sanitize_filename(file.filename)
+    extension = Path(safe_name).suffix.lower()
+    if extension not in ALLOWED_QUESTION_IMPORT_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unsupported question import type. Allowed: {', '.join(sorted(ALLOWED_QUESTION_IMPORT_EXTENSIONS))}",
+        )
+    return safe_name
+
+
+def parse_question_import_rows(file_name: str, content: bytes) -> list[dict[str, object]]:
+    extension = Path(file_name).suffix.lower()
+    text = content.decode("utf-8-sig", errors="ignore")
+    if extension == ".csv":
+        reader = csv.DictReader(io.StringIO(text))
+        fieldnames = {field.strip() for field in (reader.fieldnames or []) if field}
+        missing_columns = QUESTION_IMPORT_REQUIRED_COLUMNS - fieldnames
+        if missing_columns:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Missing required columns: {', '.join(sorted(missing_columns))}",
+            )
+        return [{"row_number": index, **row} for index, row in enumerate(reader, start=2)]
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid JSON import file") from exc
+    rows = parsed.get("questions") if isinstance(parsed, dict) else parsed
+    if not isinstance(rows, list):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="JSON import must be an array or an object with a questions array",
+        )
+    return [
+        {"row_number": index, **row}
+        for index, row in enumerate(rows, start=1)
+        if isinstance(row, dict)
+    ]
+
+
+def validate_question_import_row(row: dict[str, object]) -> tuple[str, str, str | None]:
+    question_text = str(row.get("question_text") or "").strip()
+    question_type = str(row.get("question_type") or "").strip()
+    expected_source = str(row.get("expected_source") or "").strip() or None
+    if not question_text:
+        raise ValueError("question_text is required")
+    if question_type not in QUESTION_TYPES:
+        raise ValueError(f"question_type must be one of: {', '.join(sorted(QUESTION_TYPES))}")
+    if expected_source and len(expected_source) > 255:
+        raise ValueError("expected_source must be 255 characters or fewer")
+    return question_text, question_type, expected_source
+
+
 def validate_upload_file(file: UploadFile) -> str:
     if not file.filename:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Uploaded file must have a filename")
@@ -777,6 +844,96 @@ def delete_question(
     db.delete(question)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{project_id}/question-datasets/import",
+    response_model=QuestionImportRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def import_question_dataset(
+    project_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: WritableUser,
+    dataset_name: Annotated[str, Form(min_length=1, max_length=255)],
+    file: Annotated[UploadFile, File()],
+    dataset_version: Annotated[str | None, Form(max_length=80)] = None,
+) -> dict[str, object]:
+    get_project_or_404(db, project_id)
+    safe_file_name = validate_question_import_file(file)
+    rows = parse_question_import_rows(safe_file_name, file.file.read())
+    existing_questions = set(
+        normalize_question_text(question)
+        for question in db.scalars(select(TestQuestion.question_text).where(TestQuestion.project_id == project_id)).all()
+    )
+    seen_questions: set[str] = set()
+
+    dataset = QuestionDataset(
+        project_id=project_id,
+        dataset_name=dataset_name,
+        dataset_version=dataset_version,
+        imported_file_name=safe_file_name,
+        question_count=0,
+        created_by_user_id=current_user.id,
+    )
+    db.add(dataset)
+    db.flush()
+
+    questions_imported = 0
+    duplicate_questions = 0
+    errors: list[dict[str, object]] = []
+    for row in rows:
+        row_number = int(row.get("row_number") or 0)
+        try:
+            question_text, question_type, expected_source = validate_question_import_row(row)
+        except ValueError as exc:
+            errors.append({"row_number": row_number, "message": str(exc)})
+            continue
+
+        normalized_text = normalize_question_text(question_text)
+        if normalized_text in existing_questions or normalized_text in seen_questions:
+            duplicate_questions += 1
+            continue
+
+        db.add(
+            TestQuestion(
+                project_id=project_id,
+                dataset_id=dataset.id,
+                question_text=question_text,
+                question_type=question_type,
+                expected_source=expected_source,
+                created_by_user_id=current_user.id,
+            )
+        )
+        seen_questions.add(normalized_text)
+        questions_imported += 1
+
+    dataset.question_count = questions_imported
+    db.commit()
+    db.refresh(dataset)
+    return {
+        "dataset": dataset,
+        "questions_imported": questions_imported,
+        "duplicate_questions": duplicate_questions,
+        "invalid_rows": len(errors),
+        "errors": errors,
+    }
+
+
+@router.get("/{project_id}/question-datasets", response_model=list[QuestionDatasetRead])
+def list_question_datasets(
+    project_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> list[QuestionDataset]:
+    get_project_or_404(db, project_id)
+    return list(
+        db.scalars(
+            select(QuestionDataset)
+            .where(QuestionDataset.project_id == project_id)
+            .order_by(QuestionDataset.created_at.desc(), QuestionDataset.id.desc())
+        ).all()
+    )
 
 
 @router.post("/{project_id}/runs", response_model=EvaluationRunRead, status_code=status.HTTP_201_CREATED)

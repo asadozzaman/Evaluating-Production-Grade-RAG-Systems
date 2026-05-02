@@ -152,9 +152,37 @@ class TestQuestionRead(TestQuestionCreate):
 
     id: int
     project_id: int
+    dataset_id: int | None
     created_by_user_id: int
     created_at: datetime
     updated_at: datetime
+
+
+class QuestionDatasetRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    dataset_name: str
+    dataset_version: str | None
+    imported_file_name: str | None
+    question_count: int
+    created_by_user_id: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class QuestionImportErrorRead(BaseModel):
+    row_number: int
+    message: str
+
+
+class QuestionImportRead(BaseModel):
+    dataset: QuestionDatasetRead
+    questions_imported: int
+    duplicate_questions: int
+    invalid_rows: int
+    errors: list[QuestionImportErrorRead]
 
 
 class EvaluationRunCreate(BaseModel):
