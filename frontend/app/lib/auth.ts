@@ -96,6 +96,16 @@ export type EvaluationRun = {
   status: "pending" | "running" | "completed" | "failed";
   last_error: string | null;
   processed_question_count: number;
+  dataset_id: number | null;
+  batch_document_ids: string | null;
+  auto_evaluate_enabled: boolean;
+  batch_status: string | null;
+  current_step: string | null;
+  completed_steps: string | null;
+  failed_step: string | null;
+  batch_error_message: string | null;
+  batch_started_at: string | null;
+  batch_completed_at: string | null;
   retrieval_mode: "keyword" | "vector" | null;
   generator_model_name: string | null;
   embedding_model_name: string | null;
@@ -167,6 +177,14 @@ export type RagExecutionResult = {
   retrieved_chunks_created: number;
   generated_answers_created: number;
   retrieval_mode: "keyword" | "vector";
+  message: string;
+};
+
+export type BatchExperimentResult = {
+  run: EvaluationRun;
+  rag_execution: RagExecutionResult;
+  auto_evaluation: AutoEvaluationResult | null;
+  summary: RunSummary;
   message: string;
 };
 

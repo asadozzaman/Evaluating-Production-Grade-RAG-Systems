@@ -84,13 +84,13 @@ def retrieve_vector_chunks(
     return ranked, elapsed_ms
 
 
-def list_indexed_chunks(db: Session, project_id: int) -> list[StoredDocumentChunk]:
+def list_indexed_chunks(db: Session, project_id: int, document_ids: list[int] | None = None) -> list[StoredDocumentChunk]:
+    statement = select(StoredDocumentChunk).join(SourceDocument).where(SourceDocument.project_id == project_id)
+    if document_ids:
+        statement = statement.where(SourceDocument.id.in_(document_ids))
     return list(
         db.scalars(
-            select(StoredDocumentChunk)
-            .join(SourceDocument)
-            .where(SourceDocument.project_id == project_id)
-            .order_by(SourceDocument.created_at.asc(), SourceDocument.id.asc(), StoredDocumentChunk.chunk_index.asc())
+            statement.order_by(SourceDocument.created_at.asc(), SourceDocument.id.asc(), StoredDocumentChunk.chunk_index.asc())
         ).all()
     )
 

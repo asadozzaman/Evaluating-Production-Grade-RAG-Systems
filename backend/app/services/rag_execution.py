@@ -37,19 +37,23 @@ def execute_rag_run(
     settings: Settings,
     gemini_client: GeminiClient | None = None,
     retrieval_mode: str = "keyword",
+    dataset_id: int | None = None,
+    document_ids: list[int] | None = None,
 ) -> RagExecutionResult:
+    question_statement = select(TestQuestion).where(TestQuestion.project_id == run.project_id)
+    if dataset_id is not None:
+        question_statement = question_statement.where(TestQuestion.dataset_id == dataset_id)
     questions = list(
         db.scalars(
-            select(TestQuestion)
-            .where(TestQuestion.project_id == run.project_id)
-            .order_by(TestQuestion.created_at.asc(), TestQuestion.id.asc())
+            question_statement.order_by(TestQuestion.created_at.asc(), TestQuestion.id.asc())
         ).all()
     )
+    document_statement = select(SourceDocument).where(SourceDocument.project_id == run.project_id)
+    if document_ids:
+        document_statement = document_statement.where(SourceDocument.id.in_(document_ids))
     documents = list(
         db.scalars(
-            select(SourceDocument)
-            .where(SourceDocument.project_id == run.project_id)
-            .order_by(SourceDocument.created_at.asc(), SourceDocument.id.asc())
+            document_statement.order_by(SourceDocument.created_at.asc(), SourceDocument.id.asc())
         ).all()
     )
 
@@ -62,7 +66,7 @@ def execute_rag_run(
         raise RagExecutionError("retrieval_mode must be keyword or vector.")
 
     all_chunks = build_chunks(documents) if retrieval_mode == "keyword" else []
-    indexed_chunks = list_indexed_chunks(db, run.project_id) if retrieval_mode == "vector" else []
+    indexed_chunks = list_indexed_chunks(db, run.project_id, document_ids=document_ids) if retrieval_mode == "vector" else []
     if retrieval_mode == "keyword" and not all_chunks:
         raise RagExecutionError("No extractable document text found. Upload a .txt, .md, .csv, .docx, or .pdf file with readable text.")
     if retrieval_mode == "vector" and not indexed_chunks:

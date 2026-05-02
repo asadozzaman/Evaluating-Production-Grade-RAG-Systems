@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import type { ReactNode } from "react";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import {
+  BatchExperimentResult,
   DocumentIndexResult,
   EvaluationRun,
   Project,
@@ -43,6 +44,14 @@ export default function ProjectDetailPage() {
   const [comparison, setComparison] = useState<RunComparison | null>(null);
   const [isComparing, setIsComparing] = useState(false);
   const [isImportingQuestions, setIsImportingQuestions] = useState(false);
+  const [batchRunName, setBatchRunName] = useState("Batch Gemini Evaluation");
+  const [batchDatasetId, setBatchDatasetId] = useState("");
+  const [batchDocumentIds, setBatchDocumentIds] = useState<number[]>([]);
+  const [batchRetrievalMode, setBatchRetrievalMode] = useState<"keyword" | "vector">("keyword");
+  const [shouldIndexDocuments, setShouldIndexDocuments] = useState(false);
+  const [shouldAutoEvaluate, setShouldAutoEvaluate] = useState(true);
+  const [batchResult, setBatchResult] = useState<BatchExperimentResult | null>(null);
+  const [isBatchRunning, setIsBatchRunning] = useState(false);
 
   const getToken = useCallback(() => {
     const token = localStorage.getItem(TOKEN_STORAGE_KEY);
@@ -86,6 +95,23 @@ export default function ProjectDetailPage() {
   useEffect(() => {
     loadProject();
   }, [loadProject]);
+
+  useEffect(() => {
+    if (!batchDatasetId && questionDatasets.length > 0) {
+      setBatchDatasetId(String(questionDatasets[0].id));
+    }
+  }, [batchDatasetId, questionDatasets]);
+
+  useEffect(() => {
+    setBatchDocumentIds((current) => {
+      const availableIds = documents.map((document) => document.id);
+      const retainedIds = current.filter((documentId) => availableIds.includes(documentId));
+      if (retainedIds.length > 0 || availableIds.length === 0) {
+        return retainedIds;
+      }
+      return availableIds;
+    });
+  }, [documents]);
 
   async function submitDocument(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -288,12 +314,72 @@ export default function ProjectDetailPage() {
     }
   }
 
+  async function submitBatchExperiment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    setNotice("");
+    setBatchResult(null);
+    const token = getToken();
+    if (!token) {
+      return;
+    }
+    if (!batchDatasetId) {
+      setError("Select a question dataset first.");
+      return;
+    }
+    if (batchDocumentIds.length === 0) {
+      setError("Select at least one source document.");
+      return;
+    }
+
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    setIsBatchRunning(true);
+    try {
+      const result = await authRequest<BatchExperimentResult>(
+        `/projects/${projectId}/batch-experiments`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            run_name: batchRunName,
+            dataset_id: Number(batchDatasetId),
+            document_ids: batchDocumentIds,
+            retrieval_mode: batchRetrievalMode,
+            system_version: String(formData.get("systemVersion") ?? "") || null,
+            notes: String(formData.get("notes") ?? "") || null,
+            index_documents: shouldIndexDocuments,
+            auto_evaluate: shouldAutoEvaluate,
+          }),
+        },
+        token,
+      );
+      setBatchResult(result);
+      setNotice(
+        `${result.message} Run ${result.run.id}: ${result.rag_execution.generated_answers_created} answers generated.`,
+      );
+      await loadProject();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to run batch experiment");
+    } finally {
+      setIsBatchRunning(false);
+    }
+  }
+
   function toggleRunSelection(runId: number) {
     setSelectedRunIds((current) => {
       if (current.includes(runId)) {
         return current.filter((selectedRunId) => selectedRunId !== runId);
       }
       return [...current, runId];
+    });
+  }
+
+  function toggleBatchDocument(documentId: number) {
+    setBatchDocumentIds((current) => {
+      if (current.includes(documentId)) {
+        return current.filter((selectedDocumentId) => selectedDocumentId !== documentId);
+      }
+      return [...current, documentId];
     });
   }
 
@@ -453,6 +539,98 @@ export default function ProjectDetailPage() {
 
         <section className="status comparison-panel">
           <div className="section-heading">
+            <h2>Batch Experiment</h2>
+            <span>{batchResult ? batchResult.run.id : "New"}</span>
+          </div>
+          <form className="compact-form" onSubmit={submitBatchExperiment}>
+            <input
+              name="runName"
+              placeholder="Run name"
+              required
+              value={batchRunName}
+              onChange={(event) => setBatchRunName(event.target.value)}
+            />
+            <select
+              name="datasetId"
+              required
+              value={batchDatasetId}
+              onChange={(event) => setBatchDatasetId(event.target.value)}
+            >
+              <option value="">Question dataset</option>
+              {questionDatasets.map((dataset) => (
+                <option key={dataset.id} value={dataset.id}>
+                  {dataset.dataset_name} ({dataset.question_count} questions)
+                </option>
+              ))}
+            </select>
+            <select
+              name="retrievalMode"
+              value={batchRetrievalMode}
+              onChange={(event) => setBatchRetrievalMode(event.target.value as "keyword" | "vector")}
+            >
+              <option value="keyword">Keyword retrieval</option>
+              <option value="vector">Vector retrieval</option>
+            </select>
+            <input name="systemVersion" placeholder="System version" />
+            <textarea name="notes" placeholder="Notes" rows={3} />
+            <div className="comparison-selector">
+              {documents.length === 0 ? (
+                <p className="muted">Upload at least one document before running a batch experiment.</p>
+              ) : (
+                documents.map((document) => (
+                  <label className="checkbox-row" key={document.id}>
+                    <input
+                      type="checkbox"
+                      checked={batchDocumentIds.includes(document.id)}
+                      onChange={() => toggleBatchDocument(document.id)}
+                    />
+                    <span>
+                      {document.title}
+                      {document.source_kind === "file" ? ` / ${document.original_file_name}` : ` / ${document.source_uri}`}
+                    </span>
+                  </label>
+                ))
+              )}
+            </div>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={shouldIndexDocuments}
+                onChange={(event) => setShouldIndexDocuments(event.target.checked)}
+              />
+              <span>Index selected documents before vector retrieval</span>
+            </label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={shouldAutoEvaluate}
+                onChange={(event) => setShouldAutoEvaluate(event.target.checked)}
+              />
+              <span>Run automated CLEAR-RAG evaluation after Gemini answers</span>
+            </label>
+            <div className="actions compact-actions">
+              <button
+                type="submit"
+                disabled={isBatchRunning || !batchDatasetId || batchDocumentIds.length === 0}
+              >
+                {isBatchRunning ? "Running batch..." : "Run Batch Experiment"}
+              </button>
+            </div>
+          </form>
+          {batchResult ? (
+            <div className="metric-grid">
+              <MetricCard label="Run ID" value={batchResult.run.id} />
+              <MetricCard label="Processed Questions" value={batchResult.rag_execution.processed_questions} />
+              <MetricCard label="Generated Answers" value={batchResult.rag_execution.generated_answers_created} />
+              <MetricCard label="Reviewed Answers" value={batchResult.summary.reviewed_answers} />
+              <MetricCard label="Average Overall" value={batchResult.summary.average_overall_score ?? "Not scored"} />
+              <MetricCard label="Weakest Dimension" value={batchResult.summary.weakest_dimension ?? "Not scored"} />
+            </div>
+          ) : null}
+        </section>
+
+        <section className="status comparison-panel">
+          <div className="section-heading">
             <h2>Run Comparison</h2>
             <span>{selectedRunIds.length}</span>
           </div>
@@ -567,6 +745,15 @@ function formatDelta(value: string | null): string {
     return `+${value}`;
   }
   return value;
+}
+
+function MetricCard({ label, value }: Readonly<{ label: string; value: string | number }>) {
+  return (
+    <div className="metric-card">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
 }
 
 function SetupSection({

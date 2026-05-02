@@ -905,3 +905,133 @@ def test_question_dataset_import_csv_json_validation_and_role_access(
         headers=auth_headers(admin_token),
     )
     assert missing_columns.status_code == 422
+
+
+def test_batch_experiment_runs_dataset_documents_and_auto_evaluation(
+    client_and_db: tuple[TestClient, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeGeminiBatchClient:
+        def __init__(self, settings: object) -> None:
+            self.settings = settings
+
+        def generate_answer(self, prompt: str) -> GeminiAnswer:
+            if "Return JSON only" in prompt:
+                return GeminiAnswer(
+                    text=(
+                        "{"
+                        '"citation_quality_score": 5,'
+                        '"latency_cost_score": 4,'
+                        '"evidence_faithfulness_score": 5,'
+                        '"answer_relevance_score": 5,'
+                        '"retrieval_quality_score": 5,'
+                        '"reviewer_notes": "Batch answer is grounded in the retrieved HR policy.",'
+                        '"suggested_improvement": "Keep citations tied to exact policy sections.",'
+                        '"judge_reasoning": "The retrieved chunks support the generated answer."'
+                        "}"
+                    ),
+                    model_name="gemini-judge-test",
+                    input_tokens=140,
+                    output_tokens=80,
+                    generation_time_ms=18,
+                )
+
+            return GeminiAnswer(
+                text="Employees receive 24 annual leave days, and medical certificates are required after three sick days. [1]",
+                model_name="gemini-batch-test",
+                input_tokens=110,
+                output_tokens=18,
+                generation_time_ms=28,
+            )
+
+    monkeypatch.setattr("app.services.rag_execution.GeminiClient", FakeGeminiBatchClient)
+    monkeypatch.setattr("app.routers.projects.GeminiClient", FakeGeminiBatchClient)
+
+    client, db_factory = client_and_db
+    create_user(db_factory, "admin@example.com", "admin")
+    create_user(db_factory, "viewer@example.com", "viewer")
+    admin_token = login(client, "admin@example.com")
+    viewer_token = login(client, "viewer@example.com")
+    graph = create_setup_graph(client, admin_token, "Batch Experiment")
+
+    uploaded_document = client.post(
+        f"/projects/{graph['project_id']}/documents/upload",
+        data={"title": "Batch HR Policy", "document_type": "policy", "version": "v1"},
+        files={
+            "file": (
+                "batch-hr-policy.txt",
+                (
+                    b"Employees receive 24 annual leave days after one year of service.\n"
+                    b"Employees must provide a medical certificate after three consecutive sick days."
+                ),
+                "text/plain",
+            )
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert uploaded_document.status_code == 201, uploaded_document.text
+    document_id = uploaded_document.json()["id"]
+
+    csv_content = (
+        "question_text,question_type,expected_source\n"
+        "How many annual leave days are available after one year?,simple_factual,Batch HR Policy\n"
+        "When is a medical certificate required?,conditional,Batch HR Policy\n"
+    )
+    imported = client.post(
+        f"/projects/{graph['project_id']}/question-datasets/import",
+        data={"dataset_name": "Batch HR Regression Set", "dataset_version": "v1"},
+        files={"file": ("batch-questions.csv", csv_content.encode("utf-8"), "text/csv")},
+        headers=auth_headers(admin_token),
+    )
+    assert imported.status_code == 201, imported.text
+    dataset_id = imported.json()["dataset"]["id"]
+    assert imported.json()["questions_imported"] == 2
+
+    viewer_batch = client.post(
+        f"/projects/{graph['project_id']}/batch-experiments",
+        json={
+            "run_name": "Viewer Batch",
+            "dataset_id": dataset_id,
+            "document_ids": [document_id],
+            "retrieval_mode": "keyword",
+            "auto_evaluate": True,
+        },
+        headers=auth_headers(viewer_token),
+    )
+    assert viewer_batch.status_code == 403
+
+    batch = client.post(
+        f"/projects/{graph['project_id']}/batch-experiments",
+        json={
+            "run_name": "Nightly Batch Evaluation",
+            "dataset_id": dataset_id,
+            "document_ids": [document_id],
+            "retrieval_mode": "keyword",
+            "system_version": "batch-v1",
+            "notes": "Full batch orchestration test.",
+            "index_documents": False,
+            "auto_evaluate": True,
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert batch.status_code == 201, batch.text
+    payload = batch.json()
+    run_id = payload["run"]["id"]
+    assert payload["run"]["batch_status"] == "completed"
+    assert payload["run"]["dataset_id"] == dataset_id
+    assert payload["run"]["auto_evaluate_enabled"] is True
+    assert payload["rag_execution"]["processed_questions"] == 2
+    assert payload["rag_execution"]["generated_answers_created"] == 2
+    assert payload["auto_evaluation"]["evaluated_answers"] == 2
+    assert payload["summary"]["total_questions"] == 2
+    assert payload["summary"]["generated_answers"] == 2
+    assert payload["summary"]["reviewed_answers"] == 2
+    assert payload["summary"]["average_overall_score"] == "4.80"
+
+    run = client.get(
+        f"/projects/{graph['project_id']}/runs/{run_id}",
+        headers=auth_headers(admin_token),
+    )
+    assert run.status_code == 200
+    assert run.json()["batch_status"] == "completed"
+    assert "rag_execution" in run.json()["completed_steps"]

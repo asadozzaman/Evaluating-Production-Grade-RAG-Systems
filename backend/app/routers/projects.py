@@ -2,6 +2,7 @@ import re
 import csv
 import io
 import json
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Annotated
@@ -19,6 +20,8 @@ from app.models import DocumentChunk, EvaluationRecord, EvaluationRun, Project, 
 from app.models import GeneratedAnswer, RetrievedChunk
 from app.schemas import (
     AutoEvaluationRunRead,
+    BatchExperimentCreate,
+    BatchExperimentRead,
     DocumentChunkRead,
     DocumentIndexRead,
     EvaluationRecordCreate,
@@ -95,6 +98,37 @@ def get_document_or_404(db: Session, project_id: int, document_id: int) -> Sourc
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source document not found")
     return document
+
+
+def get_dataset_or_404(db: Session, project_id: int, dataset_id: int) -> QuestionDataset:
+    dataset = db.scalar(
+        select(QuestionDataset).where(
+            QuestionDataset.id == dataset_id,
+            QuestionDataset.project_id == project_id,
+        )
+    )
+    if dataset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Question dataset not found")
+    return dataset
+
+
+def get_documents_or_404(db: Session, project_id: int, document_ids: list[int]) -> list[SourceDocument]:
+    unique_document_ids = list(dict.fromkeys(document_ids))
+    documents = list(
+        db.scalars(
+            select(SourceDocument)
+            .where(
+                SourceDocument.project_id == project_id,
+                SourceDocument.id.in_(unique_document_ids),
+            )
+            .order_by(SourceDocument.created_at.asc(), SourceDocument.id.asc())
+        ).all()
+    )
+    found_document_ids = {document.id for document in documents}
+    missing_document_ids = [document_id for document_id in unique_document_ids if document_id not in found_document_ids]
+    if missing_document_ids:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="One or more source documents were not found in this project.")
+    return documents
 
 
 def get_question_or_404(db: Session, project_id: int, question_id: int) -> TestQuestion:
@@ -203,12 +237,21 @@ def latest_by_id(items: list[object]) -> object | None:
     return sorted(items, key=lambda item: getattr(item, "id"), reverse=True)[0]
 
 
+def set_batch_step(run: EvaluationRun, current_step: str, completed_step: str | None = None) -> None:
+    completed_steps = json.loads(run.completed_steps or "[]")
+    if completed_step and completed_step not in completed_steps:
+        completed_steps.append(completed_step)
+    run.current_step = current_step
+    run.completed_steps = json.dumps(completed_steps)
+
+
 def build_run_summary(db: Session, project: Project, run: EvaluationRun) -> dict[str, object]:
+    question_statement = select(TestQuestion).where(TestQuestion.project_id == project.id)
+    if run.dataset_id is not None:
+        question_statement = question_statement.where(TestQuestion.dataset_id == run.dataset_id)
     questions = list(
         db.scalars(
-            select(TestQuestion)
-            .where(TestQuestion.project_id == project.id)
-            .order_by(TestQuestion.created_at.asc(), TestQuestion.id.asc())
+            question_statement.order_by(TestQuestion.created_at.asc(), TestQuestion.id.asc())
         ).all()
     )
     answers = list(
@@ -936,6 +979,136 @@ def list_question_datasets(
     )
 
 
+@router.post("/{project_id}/batch-experiments", response_model=BatchExperimentRead, status_code=status.HTTP_201_CREATED)
+def create_batch_experiment(
+    project_id: int,
+    payload: BatchExperimentCreate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: WritableUser,
+) -> dict[str, object]:
+    project = get_project_or_404(db, project_id)
+    dataset = get_dataset_or_404(db, project_id, payload.dataset_id)
+    if dataset.question_count <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Selected dataset has no imported questions.",
+        )
+    if db.scalar(select(TestQuestion.id).where(TestQuestion.dataset_id == dataset.id).limit(1)) is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Selected dataset has no test questions.",
+        )
+
+    unique_document_ids = list(dict.fromkeys(payload.document_ids))
+    documents = get_documents_or_404(db, project_id, unique_document_ids)
+    settings = get_settings()
+    now = datetime.now(timezone.utc)
+    run = EvaluationRun(
+        project_id=project_id,
+        name=payload.run_name,
+        system_version=payload.system_version,
+        notes=payload.notes,
+        dataset_id=dataset.id,
+        batch_document_ids=json.dumps(unique_document_ids),
+        auto_evaluate_enabled=payload.auto_evaluate,
+        batch_status="running",
+        current_step="creating_run",
+        completed_steps=json.dumps([]),
+        batch_started_at=now,
+        created_by_user_id=current_user.id,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+    auto_evaluation = None
+    try:
+        if payload.index_documents:
+            set_batch_step(run, "index_documents", "creating_run")
+            db.commit()
+            for document in documents:
+                index_source_document(db, document, settings)
+            db.refresh(run)
+
+        set_batch_step(run, "rag_execution", "index_documents" if payload.index_documents else "creating_run")
+        db.commit()
+        rag_result = execute_rag_run(
+            db,
+            run,
+            settings,
+            retrieval_mode=payload.retrieval_mode,
+            dataset_id=dataset.id,
+            document_ids=unique_document_ids,
+        )
+        rag_execution = {
+            "run_id": rag_result.run_id,
+            "status": rag_result.status,
+            "model_name": rag_result.model_name,
+            "processed_questions": rag_result.processed_questions,
+            "retrieved_chunks_created": rag_result.retrieved_chunks_created,
+            "generated_answers_created": rag_result.generated_answers_created,
+            "retrieval_mode": rag_result.retrieval_mode,
+            "message": rag_result.message,
+        }
+
+        if payload.auto_evaluate:
+            set_batch_step(run, "automated_evaluation", "rag_execution")
+            db.commit()
+            auto_evaluation = run_automated_clear_rag_evaluation(db, project_id, run, current_user)
+            db.refresh(run)
+            completed_step = "automated_evaluation"
+        else:
+            completed_step = "rag_execution"
+
+        set_batch_step(run, "completed", completed_step)
+        run.batch_status = "completed"
+        run.failed_step = None
+        run.batch_error_message = None
+        run.batch_completed_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(run)
+    except RagExecutionError as exc:
+        db.rollback()
+        failed_run = db.get(EvaluationRun, run.id)
+        if failed_run is not None:
+            failed_run.batch_status = "failed"
+            failed_run.failed_step = failed_run.current_step
+            failed_run.batch_error_message = exc.message
+            failed_run.batch_completed_at = datetime.now(timezone.utc)
+            db.commit()
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    except HTTPException as exc:
+        db.rollback()
+        failed_run = db.get(EvaluationRun, run.id)
+        if failed_run is not None:
+            failed_run.batch_status = "failed"
+            failed_run.failed_step = failed_run.current_step
+            failed_run.batch_error_message = str(exc.detail)
+            failed_run.batch_completed_at = datetime.now(timezone.utc)
+            db.commit()
+        raise
+    except Exception as exc:
+        db.rollback()
+        failed_run = db.get(EvaluationRun, run.id)
+        if failed_run is not None:
+            failed_run.batch_status = "failed"
+            failed_run.status = "failed"
+            failed_run.failed_step = failed_run.current_step
+            failed_run.batch_error_message = str(exc)
+            failed_run.last_error = str(exc)
+            failed_run.batch_completed_at = datetime.now(timezone.utc)
+            db.commit()
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    return {
+        "run": run,
+        "rag_execution": rag_execution,
+        "auto_evaluation": auto_evaluation,
+        "summary": build_run_summary(db, project, run),
+        "message": "Batch experiment completed.",
+    }
+
+
 @router.post("/{project_id}/runs", response_model=EvaluationRunRead, status_code=status.HTTP_201_CREATED)
 def create_run(
     project_id: int,
@@ -1145,15 +1318,12 @@ def execute_run(
     }
 
 
-@router.post("/{project_id}/runs/{run_id}/auto-evaluate", response_model=AutoEvaluationRunRead)
-def auto_evaluate_run(
+def run_automated_clear_rag_evaluation(
+    db: Session,
     project_id: int,
-    run_id: int,
-    db: Annotated[Session, Depends(get_db)],
-    current_user: WritableUser,
+    run: EvaluationRun,
+    current_user: User,
 ) -> dict[str, object]:
-    get_project_or_404(db, project_id)
-    run = get_run_or_404(db, project_id, run_id)
     answers = list(
         db.scalars(
             select(GeneratedAnswer)
@@ -1238,6 +1408,18 @@ def auto_evaluate_run(
         "judge_model_name": judge_model_name,
         "message": "Automated CLEAR-RAG evaluation completed.",
     }
+
+
+@router.post("/{project_id}/runs/{run_id}/auto-evaluate", response_model=AutoEvaluationRunRead)
+def auto_evaluate_run(
+    project_id: int,
+    run_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: WritableUser,
+) -> dict[str, object]:
+    get_project_or_404(db, project_id)
+    run = get_run_or_404(db, project_id, run_id)
+    return run_automated_clear_rag_evaluation(db, project_id, run, current_user)
 
 
 @router.post(

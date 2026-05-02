@@ -627,7 +627,58 @@ row-level errors
 dataset metadata
 ```
 
-The frontend project page now includes a question-set import form in the Questions section. After import, create or open a run and use the existing Gemini RAG and automated CLEAR-RAG evaluation buttons to process the full batch.
+The frontend project page now includes a question-set import form in the Questions section.
+
+## Batch Experiment Orchestration
+
+Phase 13 adds a single endpoint and frontend panel for running a full dataset-based experiment.
+
+Run a batch experiment:
+
+```text
+POST /projects/{project_id}/batch-experiments
+```
+
+JSON body:
+
+```json
+{
+  "run_name": "Nightly Batch Evaluation",
+  "dataset_id": 1,
+  "document_ids": [47],
+  "retrieval_mode": "keyword",
+  "system_version": "batch-v1",
+  "notes": "Regression test against uploaded HR policy",
+  "index_documents": false,
+  "auto_evaluate": true
+}
+```
+
+The batch workflow:
+
+```text
+validates the selected question dataset
+validates selected source documents
+creates a new evaluation run
+optionally indexes selected documents for vector retrieval
+runs Gemini RAG only for the selected dataset and documents
+optionally runs automated CLEAR-RAG judging
+saves batch status, current step, completed steps, and errors on the run
+returns the run, RAG execution result, automated evaluation result, and summary
+```
+
+Frontend flow:
+
+```text
+1. Open /dashboard/projects/{projectId}.
+2. Upload a readable document.
+3. Import a CSV or JSON question dataset.
+4. In Batch Experiment, choose the dataset and document.
+5. Select keyword or vector retrieval.
+6. Keep automated CLEAR-RAG evaluation enabled if Gemini judging should run.
+7. Click Run Batch Experiment.
+8. Open the created run from the Runs list to inspect chunks, answers, scores, and exports.
+```
 
 ## Start the Frontend
 

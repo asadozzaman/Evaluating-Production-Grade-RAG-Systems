@@ -227,6 +227,16 @@ class EvaluationRun(Base):
     status: Mapped[str] = mapped_column(String(30), default="pending", server_default="pending", nullable=False)
     last_error: Mapped[str | None] = mapped_column(Text)
     processed_question_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    dataset_id: Mapped[int | None] = mapped_column(ForeignKey("question_datasets.id", ondelete="SET NULL"), index=True)
+    batch_document_ids: Mapped[str | None] = mapped_column(Text)
+    auto_evaluate_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    batch_status: Mapped[str | None] = mapped_column(String(30))
+    current_step: Mapped[str | None] = mapped_column(String(80))
+    completed_steps: Mapped[str | None] = mapped_column(Text)
+    failed_step: Mapped[str | None] = mapped_column(String(80))
+    batch_error_message: Mapped[str | None] = mapped_column(Text)
+    batch_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    batch_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     retrieval_mode: Mapped[str | None] = mapped_column(String(30))
     generator_model_name: Mapped[str | None] = mapped_column(String(120))
     embedding_model_name: Mapped[str | None] = mapped_column(String(120))
@@ -240,6 +250,7 @@ class EvaluationRun(Base):
     )
 
     project: Mapped[Project] = relationship(back_populates="evaluation_runs")
+    dataset: Mapped[QuestionDataset | None] = relationship()
     created_by: Mapped[User] = relationship(foreign_keys=[created_by_user_id])
     retrieved_chunks: Mapped[list["RetrievedChunk"]] = relationship(
         back_populates="evaluation_run",

@@ -205,6 +205,16 @@ class EvaluationRunRead(EvaluationRunCreate):
     status: Literal["pending", "running", "completed", "failed"]
     last_error: str | None
     processed_question_count: int
+    dataset_id: int | None
+    batch_document_ids: str | None
+    auto_evaluate_enabled: bool
+    batch_status: str | None
+    current_step: str | None
+    completed_steps: str | None
+    failed_step: str | None
+    batch_error_message: str | None
+    batch_started_at: datetime | None
+    batch_completed_at: datetime | None
     retrieval_mode: RetrievalMode | None
     generator_model_name: str | None
     embedding_model_name: str | None
@@ -266,6 +276,17 @@ class RagExecutionRead(BaseModel):
 
 class RagExecutionRequest(BaseModel):
     retrieval_mode: RetrievalMode = "keyword"
+
+
+class BatchExperimentCreate(BaseModel):
+    run_name: str = Field(min_length=1, max_length=255)
+    dataset_id: int
+    document_ids: list[int] = Field(min_length=1)
+    retrieval_mode: RetrievalMode = "keyword"
+    system_version: str | None = Field(default=None, max_length=120)
+    notes: str | None = None
+    index_documents: bool = False
+    auto_evaluate: bool = True
 
 
 class EvaluationRecordCreate(BaseModel):
@@ -364,6 +385,14 @@ class RunSummaryRead(BaseModel):
     dimension_averages: DimensionScores
     weakest_dimension: str | None
     question_results: list[RunQuestionResult]
+
+
+class BatchExperimentRead(BaseModel):
+    run: EvaluationRunRead
+    rag_execution: RagExecutionRead
+    auto_evaluation: AutoEvaluationRunRead | None
+    summary: RunSummaryRead
+    message: str
 
 
 class ProjectRunSummaryRead(BaseModel):
