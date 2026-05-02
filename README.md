@@ -401,6 +401,43 @@ The run page now shows a CLEAR-RAG scoring form under generated answers:
 
 Viewers can read scores but cannot create, update, or delete them.
 
+## Evaluation Reports and Analytics
+
+Phase 8 adds run and project summaries so evaluation data can be interpreted without manually reading every record.
+
+Run summary endpoint:
+
+```text
+GET /projects/{project_id}/runs/{run_id}/summary
+```
+
+Project summary endpoint:
+
+```text
+GET /projects/{project_id}/summary
+```
+
+Run export endpoints:
+
+```text
+GET /projects/{project_id}/runs/{run_id}/export.csv
+GET /projects/{project_id}/runs/{run_id}/export.json
+```
+
+The run page now shows:
+
+```text
+total questions
+generated answers
+reviewed answers
+review completion percentage
+average overall score
+average score by CLEAR-RAG dimension
+weakest dimension
+question-level results
+CSV and JSON export buttons
+```
+
 ## Start the Frontend
 
 In a separate terminal:

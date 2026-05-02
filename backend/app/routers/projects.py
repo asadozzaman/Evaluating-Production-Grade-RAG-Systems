@@ -1,10 +1,13 @@
 import re
+import csv
+import io
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -25,9 +28,11 @@ from app.schemas import (
     ProjectCreate,
     ProjectRead,
     ProjectUpdate,
+    ProjectSummaryRead,
     RagExecutionRead,
     RetrievedChunkCreate,
     RetrievedChunkRead,
+    RunSummaryRead,
     SourceDocumentCreate,
     SourceDocumentRead,
     SourceDocumentUpdate,
@@ -43,6 +48,20 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 WritableUser = Annotated[User, Depends(require_roles(["admin", "evaluator"]))]
 AuthenticatedUser = Annotated[User, Depends(get_current_user)]
 ALLOWED_UPLOAD_EXTENSIONS = {".pdf", ".docx", ".txt", ".csv", ".md"}
+SCORE_FIELDS = [
+    "citation_quality_score",
+    "latency_cost_score",
+    "evidence_faithfulness_score",
+    "answer_relevance_score",
+    "retrieval_quality_score",
+]
+DIMENSION_LABELS = {
+    "citation_quality_score": "Citation Quality",
+    "latency_cost_score": "Latency and Cost Efficiency",
+    "evidence_faithfulness_score": "Evidence Faithfulness",
+    "answer_relevance_score": "Answer Relevance",
+    "retrieval_quality_score": "Retrieval Quality",
+}
 
 
 def get_project_or_404(db: Session, project_id: int) -> Project:
@@ -152,6 +171,145 @@ def calculate_overall_score(record: object) -> Decimal:
     return (sum(scores) / Decimal(len(scores))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+def decimal_average(values: list[Decimal]) -> Decimal | None:
+    if not values:
+        return None
+    return (sum(values) / Decimal(len(values))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def percent(part: int, whole: int) -> Decimal:
+    if whole == 0:
+        return Decimal("0.00")
+    return (Decimal(part) * Decimal("100") / Decimal(whole)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def latest_by_id(items: list[object]) -> object | None:
+    if not items:
+        return None
+    return sorted(items, key=lambda item: getattr(item, "id"), reverse=True)[0]
+
+
+def build_run_summary(db: Session, project: Project, run: EvaluationRun) -> dict[str, object]:
+    questions = list(
+        db.scalars(
+            select(TestQuestion)
+            .where(TestQuestion.project_id == project.id)
+            .order_by(TestQuestion.created_at.asc(), TestQuestion.id.asc())
+        ).all()
+    )
+    answers = list(
+        db.scalars(
+            select(GeneratedAnswer)
+            .where(GeneratedAnswer.evaluation_run_id == run.id)
+            .order_by(GeneratedAnswer.created_at.asc(), GeneratedAnswer.id.asc())
+        ).all()
+    )
+    evaluations = list(
+        db.scalars(
+            select(EvaluationRecord)
+            .where(EvaluationRecord.evaluation_run_id == run.id)
+            .order_by(EvaluationRecord.created_at.asc(), EvaluationRecord.id.asc())
+        ).all()
+    )
+
+    answers_by_question: dict[int, list[GeneratedAnswer]] = {}
+    for answer in answers:
+        answers_by_question.setdefault(answer.test_question_id, []).append(answer)
+
+    evaluations_by_answer: dict[int, list[EvaluationRecord]] = {}
+    for evaluation in evaluations:
+        evaluations_by_answer.setdefault(evaluation.generated_answer_id, []).append(evaluation)
+
+    dimension_averages = {
+        field: decimal_average([Decimal(getattr(evaluation, field)) for evaluation in evaluations])
+        for field in SCORE_FIELDS
+    }
+    available_dimensions = {field: value for field, value in dimension_averages.items() if value is not None}
+    weakest_dimension = None
+    if available_dimensions:
+        weakest_field = min(available_dimensions, key=lambda field: available_dimensions[field] or Decimal("0"))
+        weakest_dimension = DIMENSION_LABELS[weakest_field]
+
+    reviewed_answer_ids = set(evaluations_by_answer)
+    question_results = []
+    for question in questions:
+        question_answers = answers_by_question.get(question.id, [])
+        latest_answer = latest_by_id(question_answers)
+        latest_evaluation = None
+        if latest_answer is not None:
+            latest_evaluation = latest_by_id(evaluations_by_answer.get(latest_answer.id, []))
+
+        question_results.append(
+            {
+                "question_id": question.id,
+                "question_text": question.question_text,
+                "answer_id": latest_answer.id if latest_answer else None,
+                "answer_text": latest_answer.answer_text if latest_answer else None,
+                "reviewed": latest_evaluation is not None,
+                "overall_score": latest_evaluation.overall_score if latest_evaluation else None,
+                "citation_quality_score": latest_evaluation.citation_quality_score if latest_evaluation else None,
+                "latency_cost_score": latest_evaluation.latency_cost_score if latest_evaluation else None,
+                "evidence_faithfulness_score": latest_evaluation.evidence_faithfulness_score if latest_evaluation else None,
+                "answer_relevance_score": latest_evaluation.answer_relevance_score if latest_evaluation else None,
+                "retrieval_quality_score": latest_evaluation.retrieval_quality_score if latest_evaluation else None,
+            }
+        )
+
+    return {
+        "project_id": project.id,
+        "run_id": run.id,
+        "run_name": run.name,
+        "total_questions": len(questions),
+        "generated_answers": len(answers),
+        "reviewed_answers": len(reviewed_answer_ids),
+        "review_completion_percent": percent(len(reviewed_answer_ids), len(answers)),
+        "average_overall_score": decimal_average([evaluation.overall_score for evaluation in evaluations]),
+        "dimension_averages": dimension_averages,
+        "weakest_dimension": weakest_dimension,
+        "question_results": question_results,
+    }
+
+
+def build_project_summary(db: Session, project: Project) -> dict[str, object]:
+    runs = list(
+        db.scalars(
+            select(EvaluationRun)
+            .where(EvaluationRun.project_id == project.id)
+            .order_by(EvaluationRun.created_at.desc(), EvaluationRun.id.desc())
+        ).all()
+    )
+
+    run_summaries = []
+    all_overall_scores: list[Decimal] = []
+    for run in runs:
+        summary = build_run_summary(db, project, run)
+        if summary["average_overall_score"] is not None:
+            all_overall_scores.append(summary["average_overall_score"])
+        run_summaries.append(
+            {
+                "run_id": run.id,
+                "run_name": run.name,
+                "generated_answers": summary["generated_answers"],
+                "reviewed_answers": summary["reviewed_answers"],
+                "average_overall_score": summary["average_overall_score"],
+            }
+        )
+
+    scored_runs = [run_summary for run_summary in run_summaries if run_summary["average_overall_score"] is not None]
+    best_run = max(scored_runs, key=lambda item: item["average_overall_score"]) if scored_runs else None
+    weakest_run = min(scored_runs, key=lambda item: item["average_overall_score"]) if scored_runs else None
+
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        "total_runs": len(runs),
+        "average_overall_score": decimal_average(all_overall_scores),
+        "best_run": best_run,
+        "weakest_run": weakest_run,
+        "runs": run_summaries,
+    }
+
+
 def apply_updates(instance: object, payload: object) -> None:
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(instance, key, value)
@@ -237,6 +395,16 @@ def read_project(
     _: AuthenticatedUser,
 ) -> Project:
     return get_project_or_404(db, project_id)
+
+
+@router.get("/{project_id}/summary", response_model=ProjectSummaryRead)
+def read_project_summary(
+    project_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> dict[str, object]:
+    project = get_project_or_404(db, project_id)
+    return build_project_summary(db, project)
 
 
 @router.patch("/{project_id}", response_model=ProjectRead)
@@ -496,6 +664,82 @@ def read_run(
 ) -> EvaluationRun:
     get_project_or_404(db, project_id)
     return get_run_or_404(db, project_id, run_id)
+
+
+@router.get("/{project_id}/runs/{run_id}/summary", response_model=RunSummaryRead)
+def read_run_summary(
+    project_id: int,
+    run_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> dict[str, object]:
+    project = get_project_or_404(db, project_id)
+    run = get_run_or_404(db, project_id, run_id)
+    return build_run_summary(db, project, run)
+
+
+@router.get("/{project_id}/runs/{run_id}/export.json")
+def export_run_json(
+    project_id: int,
+    run_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> dict[str, object]:
+    project = get_project_or_404(db, project_id)
+    run = get_run_or_404(db, project_id, run_id)
+    return build_run_summary(db, project, run)
+
+
+@router.get("/{project_id}/runs/{run_id}/export.csv")
+def export_run_csv(
+    project_id: int,
+    run_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> StreamingResponse:
+    project = get_project_or_404(db, project_id)
+    run = get_run_or_404(db, project_id, run_id)
+    summary = build_run_summary(db, project, run)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(
+        [
+            "question_id",
+            "question_text",
+            "answer_id",
+            "answer_text",
+            "reviewed",
+            "overall_score",
+            "citation_quality_score",
+            "latency_cost_score",
+            "evidence_faithfulness_score",
+            "answer_relevance_score",
+            "retrieval_quality_score",
+        ]
+    )
+    for row in summary["question_results"]:
+        writer.writerow(
+            [
+                row["question_id"],
+                row["question_text"],
+                row["answer_id"],
+                row["answer_text"],
+                row["reviewed"],
+                row["overall_score"],
+                row["citation_quality_score"],
+                row["latency_cost_score"],
+                row["evidence_faithfulness_score"],
+                row["answer_relevance_score"],
+                row["retrieval_quality_score"],
+            ]
+        )
+
+    filename = f"clear-rag-run-{run_id}-summary.csv"
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.patch("/{project_id}/runs/{run_id}", response_model=EvaluationRunRead)

@@ -254,3 +254,57 @@ class EvaluationRecordRead(EvaluationRecordCreate):
     overall_score: Decimal
     created_at: datetime
     updated_at: datetime
+
+
+class DimensionScores(BaseModel):
+    citation_quality_score: Decimal | None = None
+    latency_cost_score: Decimal | None = None
+    evidence_faithfulness_score: Decimal | None = None
+    answer_relevance_score: Decimal | None = None
+    retrieval_quality_score: Decimal | None = None
+
+
+class RunQuestionResult(BaseModel):
+    question_id: int
+    question_text: str
+    answer_id: int | None
+    answer_text: str | None
+    reviewed: bool
+    overall_score: Decimal | None
+    citation_quality_score: int | None
+    latency_cost_score: int | None
+    evidence_faithfulness_score: int | None
+    answer_relevance_score: int | None
+    retrieval_quality_score: int | None
+
+
+class RunSummaryRead(BaseModel):
+    project_id: int
+    run_id: int
+    run_name: str
+    total_questions: int
+    generated_answers: int
+    reviewed_answers: int
+    review_completion_percent: Decimal
+    average_overall_score: Decimal | None
+    dimension_averages: DimensionScores
+    weakest_dimension: str | None
+    question_results: list[RunQuestionResult]
+
+
+class ProjectRunSummaryRead(BaseModel):
+    run_id: int
+    run_name: str
+    generated_answers: int
+    reviewed_answers: int
+    average_overall_score: Decimal | None
+
+
+class ProjectSummaryRead(BaseModel):
+    project_id: int
+    project_name: str
+    total_runs: int
+    average_overall_score: Decimal | None
+    best_run: ProjectRunSummaryRead | None
+    weakest_run: ProjectRunSummaryRead | None
+    runs: list[ProjectRunSummaryRead]

@@ -123,6 +123,42 @@ export type RagExecutionResult = {
   message: string;
 };
 
+export type DimensionScores = {
+  citation_quality_score: string | null;
+  latency_cost_score: string | null;
+  evidence_faithfulness_score: string | null;
+  answer_relevance_score: string | null;
+  retrieval_quality_score: string | null;
+};
+
+export type RunQuestionResult = {
+  question_id: number;
+  question_text: string;
+  answer_id: number | null;
+  answer_text: string | null;
+  reviewed: boolean;
+  overall_score: string | null;
+  citation_quality_score: number | null;
+  latency_cost_score: number | null;
+  evidence_faithfulness_score: number | null;
+  answer_relevance_score: number | null;
+  retrieval_quality_score: number | null;
+};
+
+export type RunSummary = {
+  project_id: number;
+  run_id: number;
+  run_name: string;
+  total_questions: number;
+  generated_answers: number;
+  reviewed_answers: number;
+  review_completion_percent: string;
+  average_overall_score: string | null;
+  dimension_averages: DimensionScores;
+  weakest_dimension: string | null;
+  question_results: RunQuestionResult[];
+};
+
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 export const TOKEN_STORAGE_KEY = "clear-rag-token";
 

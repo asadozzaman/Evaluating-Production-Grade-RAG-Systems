@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
+  API_URL,
   EvaluationRun,
   EvaluationRecord,
   GeneratedAnswer,
@@ -12,12 +13,20 @@ import {
   RetrievedChunk,
   SourceDocument,
   TOKEN_STORAGE_KEY,
+  RunSummary,
   TestQuestion,
   authRequest,
 } from "../../../../../lib/auth";
 
 const relevanceLabels = ["high", "medium", "low", "irrelevant"];
 const scoreOptions = [1, 2, 3, 4, 5];
+const dimensionLabels: Array<[keyof RunSummary["dimension_averages"], string]> = [
+  ["citation_quality_score", "Citation Quality"],
+  ["latency_cost_score", "Latency and Cost"],
+  ["evidence_faithfulness_score", "Evidence Faithfulness"],
+  ["answer_relevance_score", "Answer Relevance"],
+  ["retrieval_quality_score", "Retrieval Quality"],
+];
 
 export default function RunOutputPage() {
   const params = useParams<{ projectId: string; runId: string }>();
@@ -32,6 +41,7 @@ export default function RunOutputPage() {
   const [chunks, setChunks] = useState<RetrievedChunk[]>([]);
   const [answers, setAnswers] = useState<GeneratedAnswer[]>([]);
   const [evaluations, setEvaluations] = useState<EvaluationRecord[]>([]);
+  const [summary, setSummary] = useState<RunSummary | null>(null);
   const [executionResult, setExecutionResult] = useState<RagExecutionResult | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
   const [error, setError] = useState("");
@@ -83,6 +93,19 @@ export default function RunOutputPage() {
     [getToken, projectId, runId],
   );
 
+  const loadSummary = useCallback(async () => {
+    const token = getToken();
+    if (!token) {
+      return;
+    }
+    const summaryData = await authRequest<RunSummary>(
+      `/projects/${projectId}/runs/${runId}/summary`,
+      { method: "GET" },
+      token,
+    );
+    setSummary(summaryData);
+  }, [getToken, projectId, runId]);
+
   const loadPage = useCallback(async () => {
     const token = getToken();
     if (!token) {
@@ -90,16 +113,18 @@ export default function RunOutputPage() {
     }
 
     try {
-      const [projectData, runData, documentData, questionData] = await Promise.all([
+      const [projectData, runData, documentData, questionData, summaryData] = await Promise.all([
         authRequest<Project>(`/projects/${projectId}`, { method: "GET" }, token),
         authRequest<EvaluationRun>(`/projects/${projectId}/runs/${runId}`, { method: "GET" }, token),
         authRequest<SourceDocument[]>(`/projects/${projectId}/documents`, { method: "GET" }, token),
         authRequest<TestQuestion[]>(`/projects/${projectId}/questions`, { method: "GET" }, token),
+        authRequest<RunSummary>(`/projects/${projectId}/runs/${runId}/summary`, { method: "GET" }, token),
       ]);
       setProject(projectData);
       setRun(runData);
       setDocuments(documentData);
       setQuestions(questionData);
+      setSummary(summaryData);
       const firstQuestionId = questionData[0] ? String(questionData[0].id) : "";
       setSelectedQuestionId((current) => current || firstQuestionId);
       if (firstQuestionId) {
@@ -211,12 +236,14 @@ export default function RunOutputPage() {
       if (selectedQuestionId) {
         await loadOutputs(selectedQuestionId);
       }
+      await loadSummary();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to run Gemini RAG");
       const refreshedRun = await authRequest<EvaluationRun>(`/projects/${projectId}/runs/${runId}`, { method: "GET" }, token).catch(() => null);
       if (refreshedRun) {
         setRun(refreshedRun);
       }
+      await loadSummary().catch(() => undefined);
     } finally {
       setIsExecuting(false);
     }
@@ -251,8 +278,36 @@ export default function RunOutputPage() {
       );
       form.reset();
       await loadOutputs(selectedQuestionId);
+      await loadSummary();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to save evaluation");
+    }
+  }
+
+  async function downloadExport(format: "csv" | "json") {
+    const token = getToken();
+    if (!token) {
+      return;
+    }
+    try {
+      const response = await fetch(`${API_URL}/projects/${projectId}/runs/${runId}/export.${format}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.detail ?? "Unable to download export");
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `clear-rag-run-${runId}.${format}`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to download export");
     }
   }
 
@@ -318,6 +373,8 @@ export default function RunOutputPage() {
             </p>
           ) : null}
         </div>
+
+        {summary ? <RunAnalytics summary={summary} onDownload={downloadExport} /> : null}
 
         <div className="status run-selector">
           <label>
@@ -424,6 +481,74 @@ function optionalString(value: FormDataEntryValue | null): string | null {
     return null;
   }
   return value;
+}
+
+function RunAnalytics({
+  summary,
+  onDownload,
+}: Readonly<{
+  summary: RunSummary;
+  onDownload: (format: "csv" | "json") => void;
+}>) {
+  return (
+    <section className="status analytics-panel">
+      <div className="section-heading">
+        <h2>Evaluation Summary</h2>
+        <div className="actions compact-actions">
+          <button type="button" onClick={() => onDownload("csv")}>
+            Export CSV
+          </button>
+          <button type="button" onClick={() => onDownload("json")}>
+            Export JSON
+          </button>
+        </div>
+      </div>
+      <div className="metric-grid">
+        <MetricCard label="Questions" value={summary.total_questions} />
+        <MetricCard label="Generated Answers" value={summary.generated_answers} />
+        <MetricCard label="Reviewed Answers" value={summary.reviewed_answers} />
+        <MetricCard label="Completion" value={`${summary.review_completion_percent}%`} />
+        <MetricCard label="Average Overall" value={summary.average_overall_score ?? "Not scored"} />
+        <MetricCard label="Weakest Dimension" value={summary.weakest_dimension ?? "Not scored"} />
+      </div>
+      <div className="dimension-list">
+        {dimensionLabels.map(([key, label]) => {
+          const value = summary.dimension_averages[key];
+          const numericValue = value ? Number(value) : 0;
+          return (
+            <div className="dimension-row" key={key}>
+              <div className="status-row">
+                <span>{label}</span>
+                <span>{value ?? "Not scored"}</span>
+              </div>
+              <div className="score-bar">
+                <span style={{ width: `${Math.min(100, (numericValue / 5) * 100)}%` }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="question-results">
+        <h3>Question Results</h3>
+        {summary.question_results.map((result) => (
+          <div className="mini-list-item" key={result.question_id}>
+            <strong>{result.question_text}</strong>
+            <span>{result.reviewed ? `Reviewed / Overall ${result.overall_score}` : "Not reviewed"}</span>
+            {result.answer_text ? <p>{result.answer_text}</p> : <p>No generated answer yet.</p>}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function MetricCard({ label, value }: Readonly<{ label: string; value: string | number }>) {
+  return (
+    <div className="metric-card">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
 }
 
 function SetupSection({

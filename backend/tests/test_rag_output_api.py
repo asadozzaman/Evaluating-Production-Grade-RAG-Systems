@@ -453,6 +453,42 @@ def test_clear_rag_evaluation_scoring_and_role_access(
     assert update_evaluation.status_code == 200, update_evaluation.text
     assert update_evaluation.json()["overall_score"] == "5.00"
 
+    run_summary = client.get(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/summary",
+        headers=auth_headers(viewer_token),
+    )
+    assert run_summary.status_code == 200, run_summary.text
+    run_summary_payload = run_summary.json()
+    assert run_summary_payload["total_questions"] == 1
+    assert run_summary_payload["generated_answers"] == 1
+    assert run_summary_payload["reviewed_answers"] == 1
+    assert run_summary_payload["review_completion_percent"] == "100.00"
+    assert run_summary_payload["average_overall_score"] == "5.00"
+    assert run_summary_payload["weakest_dimension"] == "Citation Quality"
+    assert run_summary_payload["question_results"][0]["reviewed"] is True
+
+    project_summary = client.get(
+        f"/projects/{graph['project_id']}/summary",
+        headers=auth_headers(viewer_token),
+    )
+    assert project_summary.status_code == 200, project_summary.text
+    assert project_summary.json()["average_overall_score"] == "5.00"
+
+    json_export = client.get(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/export.json",
+        headers=auth_headers(viewer_token),
+    )
+    assert json_export.status_code == 200
+    assert json_export.json()["question_results"][0]["answer_id"] == answer_id
+
+    csv_export = client.get(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/export.csv",
+        headers=auth_headers(viewer_token),
+    )
+    assert csv_export.status_code == 200
+    assert "question_id,question_text,answer_id" in csv_export.text
+    assert "Employees receive 20 days" in csv_export.text
+
     viewer_delete = client.delete(
         f"/projects/{graph['project_id']}/runs/{graph['run_id']}/evaluations/{evaluation_payload['id']}",
         headers=auth_headers(viewer_token),

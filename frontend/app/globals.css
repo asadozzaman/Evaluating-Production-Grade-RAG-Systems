@@ -317,9 +317,68 @@ select:focus {
   margin-bottom: 16px;
 }
 
+.analytics-panel {
+  margin-bottom: 16px;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.metric-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f7f7f4;
+}
+
+.metric-card span {
+  color: #5a6863;
+  font-size: 13px;
+}
+
+.metric-card strong {
+  color: #17231f;
+  font-size: 18px;
+}
+
+.dimension-list,
+.question-results {
+  display: grid;
+  gap: 10px;
+}
+
+.dimension-row {
+  display: grid;
+  gap: 6px;
+}
+
+.score-bar {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e7ece8;
+}
+
+.score-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #17483c;
+}
+
+.question-results h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
 @media (max-width: 860px) {
   .setup-grid,
-  .two-column-grid {
+  .two-column-grid,
+  .metric-grid {
     grid-template-columns: 1fr;
   }
 }
