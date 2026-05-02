@@ -215,7 +215,7 @@ export default function RunOutputPage() {
         </div>
 
         <p className="summary">
-          Add retrieved chunks and generated answers for a selected test question.
+          Add retrieved chunks and generated answers for a selected test question. Keep API keys in backend environment files only.
         </p>
         {error ? <p className="error">{error}</p> : null}
 
@@ -277,7 +277,7 @@ export default function RunOutputPage() {
           <SetupSection title="Generated Answers" count={answers.length}>
             <form className="compact-form" onSubmit={submitAnswer}>
               <textarea name="answerText" placeholder="Generated answer" rows={6} required />
-              <input name="modelName" placeholder="Model name" />
+              <input name="modelName" placeholder="Gemini model name, not API key" />
               <input name="inputTokens" type="number" min={0} placeholder="Input tokens" />
               <input name="outputTokens" type="number" min={0} placeholder="Output tokens" />
               <input name="generationTimeMs" type="number" min={0} placeholder="Generation time ms" />
