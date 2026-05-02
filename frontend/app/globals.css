@@ -270,6 +270,26 @@ select:focus {
   gap: 10px;
 }
 
+.review-list {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid #d9ddd7;
+  padding-top: 14px;
+}
+
+.review-list h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.review-card {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f7f7f4;
+}
+
 .mini-list-item {
   display: grid;
   gap: 5px;

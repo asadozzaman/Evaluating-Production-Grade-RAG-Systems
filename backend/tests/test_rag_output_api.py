@@ -354,3 +354,113 @@ def test_execute_rag_run_with_uploaded_text_and_mocked_gemini(
     )
     assert answers.status_code == 200
     assert answers.json()[0]["model_name"] == "gemini-test"
+
+
+def test_clear_rag_evaluation_scoring_and_role_access(
+    client_and_db: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, db_factory = client_and_db
+    create_user(db_factory, "admin@example.com", "admin")
+    create_user(db_factory, "viewer@example.com", "viewer")
+    admin_token = login(client, "admin@example.com")
+    viewer_token = login(client, "viewer@example.com")
+    graph = create_setup_graph(client, admin_token, "CLEAR-RAG Scoring")
+
+    answer_path = (
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}"
+        f"/questions/{graph['question_id']}/generated-answers"
+    )
+    answer = client.post(
+        answer_path,
+        json={
+            "answer_text": "Employees receive 20 days of annual leave after one year.",
+            "model_name": "gemini-test",
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "generation_time_ms": 900,
+            "estimated_cost": "0.000000",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert answer.status_code == 201, answer.text
+    answer_id = answer.json()["id"]
+
+    evaluation_path = (
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}"
+        f"/questions/{graph['question_id']}/answers/{answer_id}/evaluations"
+    )
+
+    viewer_score = client.post(
+        evaluation_path,
+        json={
+            "citation_quality_score": 5,
+            "latency_cost_score": 4,
+            "evidence_faithfulness_score": 5,
+            "answer_relevance_score": 5,
+            "retrieval_quality_score": 4,
+        },
+        headers=auth_headers(viewer_token),
+    )
+    assert viewer_score.status_code == 403
+
+    evaluation = client.post(
+        evaluation_path,
+        json={
+            "citation_quality_score": 5,
+            "latency_cost_score": 4,
+            "evidence_faithfulness_score": 5,
+            "answer_relevance_score": 5,
+            "retrieval_quality_score": 4,
+            "reviewer_notes": "Accurate and grounded in evidence.",
+            "suggested_improvement": "Reduce extra retrieved chunks.",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert evaluation.status_code == 201, evaluation.text
+    evaluation_payload = evaluation.json()
+    assert evaluation_payload["overall_score"] == "4.60"
+    assert evaluation_payload["reviewer_notes"] == "Accurate and grounded in evidence."
+
+    invalid_score = client.post(
+        evaluation_path,
+        json={
+            "citation_quality_score": 6,
+            "latency_cost_score": 4,
+            "evidence_faithfulness_score": 5,
+            "answer_relevance_score": 5,
+            "retrieval_quality_score": 4,
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert invalid_score.status_code == 422
+
+    list_evaluations = client.get(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/evaluations",
+        headers=auth_headers(viewer_token),
+    )
+    assert list_evaluations.status_code == 200
+    assert len(list_evaluations.json()) == 1
+
+    update_evaluation = client.patch(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/evaluations/{evaluation_payload['id']}",
+        json={
+            "latency_cost_score": 5,
+            "retrieval_quality_score": 5,
+            "reviewer_notes": "Strong answer across all dimensions.",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert update_evaluation.status_code == 200, update_evaluation.text
+    assert update_evaluation.json()["overall_score"] == "5.00"
+
+    viewer_delete = client.delete(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/evaluations/{evaluation_payload['id']}",
+        headers=auth_headers(viewer_token),
+    )
+    assert viewer_delete.status_code == 403
+
+    delete_evaluation = client.delete(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/evaluations/{evaluation_payload['id']}",
+        headers=auth_headers(admin_token),
+    )
+    assert delete_evaluation.status_code == 204

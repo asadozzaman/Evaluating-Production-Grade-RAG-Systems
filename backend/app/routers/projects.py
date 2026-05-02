@@ -1,4 +1,5 @@
 import re
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
@@ -10,9 +11,12 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user, require_roles
 from app.config import BACKEND_ROOT, get_settings
 from app.database import get_db
-from app.models import EvaluationRun, Project, SourceDocument, TestQuestion, User
+from app.models import EvaluationRecord, EvaluationRun, Project, SourceDocument, TestQuestion, User
 from app.models import GeneratedAnswer, RetrievedChunk
 from app.schemas import (
+    EvaluationRecordCreate,
+    EvaluationRecordRead,
+    EvaluationRecordUpdate,
     EvaluationRunCreate,
     EvaluationRunRead,
     EvaluationRunUpdate,
@@ -110,6 +114,18 @@ def get_answer_or_404(db: Session, run_id: int, question_id: int, answer_id: int
     return answer
 
 
+def get_evaluation_or_404(db: Session, run_id: int, evaluation_id: int) -> EvaluationRecord:
+    evaluation = db.scalar(
+        select(EvaluationRecord).where(
+            EvaluationRecord.id == evaluation_id,
+            EvaluationRecord.evaluation_run_id == run_id,
+        )
+    )
+    if evaluation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evaluation record not found")
+    return evaluation
+
+
 def validate_output_scope(
     db: Session,
     project_id: int,
@@ -123,6 +139,17 @@ def validate_output_scope(
     if source_document_id is not None:
         document = get_document_or_404(db, project_id, source_document_id)
     return run, question, document
+
+
+def calculate_overall_score(record: object) -> Decimal:
+    scores = [
+        Decimal(getattr(record, "citation_quality_score")),
+        Decimal(getattr(record, "latency_cost_score")),
+        Decimal(getattr(record, "evidence_faithfulness_score")),
+        Decimal(getattr(record, "answer_relevance_score")),
+        Decimal(getattr(record, "retrieval_quality_score")),
+    ]
+    return (sum(scores) / Decimal(len(scores))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 def apply_updates(instance: object, payload: object) -> None:
@@ -657,5 +684,98 @@ def delete_generated_answer(
     validate_output_scope(db, project_id, run_id, question_id)
     answer = get_answer_or_404(db, run_id, question_id, answer_id)
     db.delete(answer)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{project_id}/runs/{run_id}/questions/{question_id}/answers/{answer_id}/evaluations",
+    response_model=EvaluationRecordRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_evaluation_record(
+    project_id: int,
+    run_id: int,
+    question_id: int,
+    answer_id: int,
+    payload: EvaluationRecordCreate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: WritableUser,
+) -> EvaluationRecord:
+    validate_output_scope(db, project_id, run_id, question_id)
+    get_answer_or_404(db, run_id, question_id, answer_id)
+    evaluation = EvaluationRecord(
+        **payload.model_dump(),
+        evaluation_run_id=run_id,
+        test_question_id=question_id,
+        generated_answer_id=answer_id,
+        reviewer_user_id=current_user.id,
+        overall_score=Decimal("1.00"),
+    )
+    evaluation.overall_score = calculate_overall_score(evaluation)
+    db.add(evaluation)
+    db.commit()
+    db.refresh(evaluation)
+    return evaluation
+
+
+@router.get(
+    "/{project_id}/runs/{run_id}/evaluations",
+    response_model=list[EvaluationRecordRead],
+)
+def list_evaluation_records(
+    project_id: int,
+    run_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> list[EvaluationRecord]:
+    get_project_or_404(db, project_id)
+    get_run_or_404(db, project_id, run_id)
+    return list(
+        db.scalars(
+            select(EvaluationRecord)
+            .where(EvaluationRecord.evaluation_run_id == run_id)
+            .order_by(EvaluationRecord.created_at.desc(), EvaluationRecord.id.desc())
+        ).all()
+    )
+
+
+@router.patch(
+    "/{project_id}/runs/{run_id}/evaluations/{evaluation_id}",
+    response_model=EvaluationRecordRead,
+)
+def update_evaluation_record(
+    project_id: int,
+    run_id: int,
+    evaluation_id: int,
+    payload: EvaluationRecordUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    _: WritableUser,
+) -> EvaluationRecord:
+    get_project_or_404(db, project_id)
+    get_run_or_404(db, project_id, run_id)
+    evaluation = get_evaluation_or_404(db, run_id, evaluation_id)
+    apply_updates(evaluation, payload)
+    evaluation.overall_score = calculate_overall_score(evaluation)
+    db.commit()
+    db.refresh(evaluation)
+    return evaluation
+
+
+@router.delete(
+    "/{project_id}/runs/{run_id}/evaluations/{evaluation_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_evaluation_record(
+    project_id: int,
+    run_id: int,
+    evaluation_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: WritableUser,
+) -> Response:
+    get_project_or_404(db, project_id)
+    get_run_or_404(db, project_id, run_id)
+    evaluation = get_evaluation_or_404(db, run_id, evaluation_id)
+    db.delete(evaluation)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

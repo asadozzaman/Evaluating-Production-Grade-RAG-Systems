@@ -366,6 +366,41 @@ This replaces previous retrieved chunks and generated answers for that run. URI-
 
 Phase 6 still uses simple keyword retrieval. Embeddings, vector search, production-grade retriever evaluation, and CLEAR-RAG human scoring are later phases.
 
+## CLEAR-RAG Human Evaluation Scoring
+
+Phase 7 adds evaluator scoring for generated answers. Admins and evaluators can score each answer on the five CLEAR-RAG dimensions:
+
+```text
+Citation Quality
+Latency and Cost Efficiency
+Evidence Faithfulness
+Answer Relevance
+Retrieval Quality
+```
+
+Scores use a 1-5 scale. The backend calculates the overall score automatically:
+
+```text
+overall_score = average of the five dimension scores
+```
+
+Evaluation endpoints:
+
+```text
+POST   /projects/{project_id}/runs/{run_id}/questions/{question_id}/answers/{answer_id}/evaluations
+GET    /projects/{project_id}/runs/{run_id}/evaluations
+PATCH  /projects/{project_id}/runs/{run_id}/evaluations/{evaluation_id}
+DELETE /projects/{project_id}/runs/{run_id}/evaluations/{evaluation_id}
+```
+
+The run page now shows a CLEAR-RAG scoring form under generated answers:
+
+```text
+/dashboard/projects/{projectId}/runs/{runId}
+```
+
+Viewers can read scores but cannot create, update, or delete them.
+
 ## Start the Frontend
 
 In a separate terminal:

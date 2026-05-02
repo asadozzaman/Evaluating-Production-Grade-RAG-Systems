@@ -95,6 +95,24 @@ export type GeneratedAnswer = {
   created_at: string;
 };
 
+export type EvaluationRecord = {
+  id: number;
+  evaluation_run_id: number;
+  test_question_id: number;
+  generated_answer_id: number;
+  reviewer_user_id: number;
+  citation_quality_score: number;
+  latency_cost_score: number;
+  evidence_faithfulness_score: number;
+  answer_relevance_score: number;
+  retrieval_quality_score: number;
+  overall_score: string;
+  reviewer_notes: string | null;
+  suggested_improvement: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type RagExecutionResult = {
   run_id: number;
   status: "completed" | "failed";

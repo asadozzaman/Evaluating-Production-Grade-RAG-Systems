@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   EvaluationRun,
+  EvaluationRecord,
   GeneratedAnswer,
   Project,
   RagExecutionResult,
@@ -16,6 +17,7 @@ import {
 } from "../../../../../lib/auth";
 
 const relevanceLabels = ["high", "medium", "low", "irrelevant"];
+const scoreOptions = [1, 2, 3, 4, 5];
 
 export default function RunOutputPage() {
   const params = useParams<{ projectId: string; runId: string }>();
@@ -29,6 +31,7 @@ export default function RunOutputPage() {
   const [selectedQuestionId, setSelectedQuestionId] = useState("");
   const [chunks, setChunks] = useState<RetrievedChunk[]>([]);
   const [answers, setAnswers] = useState<GeneratedAnswer[]>([]);
+  const [evaluations, setEvaluations] = useState<EvaluationRecord[]>([]);
   const [executionResult, setExecutionResult] = useState<RagExecutionResult | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
   const [error, setError] = useState("");
@@ -56,7 +59,7 @@ export default function RunOutputPage() {
         return;
       }
 
-      const [chunkData, answerData] = await Promise.all([
+      const [chunkData, answerData, evaluationData] = await Promise.all([
         authRequest<RetrievedChunk[]>(
           `/projects/${projectId}/runs/${runId}/questions/${questionId}/retrieved-chunks`,
           { method: "GET" },
@@ -67,9 +70,15 @@ export default function RunOutputPage() {
           { method: "GET" },
           token,
         ),
+        authRequest<EvaluationRecord[]>(
+          `/projects/${projectId}/runs/${runId}/evaluations`,
+          { method: "GET" },
+          token,
+        ),
       ]);
       setChunks(chunkData);
       setAnswers(answerData);
+      setEvaluations(evaluationData);
     },
     [getToken, projectId, runId],
   );
@@ -210,6 +219,40 @@ export default function RunOutputPage() {
       }
     } finally {
       setIsExecuting(false);
+    }
+  }
+
+  async function submitEvaluation(answerId: number, event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    const token = getToken();
+    if (!token || !selectedQuestionId) {
+      return;
+    }
+
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    try {
+      await authRequest(
+        `/projects/${projectId}/runs/${runId}/questions/${selectedQuestionId}/answers/${answerId}/evaluations`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            citation_quality_score: Number(formData.get("citationQualityScore")),
+            latency_cost_score: Number(formData.get("latencyCostScore")),
+            evidence_faithfulness_score: Number(formData.get("evidenceFaithfulnessScore")),
+            answer_relevance_score: Number(formData.get("answerRelevanceScore")),
+            retrieval_quality_score: Number(formData.get("retrievalQualityScore")),
+            reviewer_notes: optionalString(formData.get("reviewerNotes")),
+            suggested_improvement: optionalString(formData.get("suggestedImprovement")),
+          }),
+        },
+        token,
+      );
+      form.reset();
+      await loadOutputs(selectedQuestionId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to save evaluation");
     }
   }
 
@@ -357,6 +400,11 @@ export default function RunOutputPage() {
                   .join(" · "),
               }))}
             />
+            <EvaluationReviewList
+              answers={answers}
+              evaluations={evaluations}
+              onSubmit={submitEvaluation}
+            />
           </SetupSection>
         </div>
       </section>
@@ -395,6 +443,75 @@ function SetupSection({
       </div>
       {children}
     </section>
+  );
+}
+
+function EvaluationReviewList({
+  answers,
+  evaluations,
+  onSubmit,
+}: Readonly<{
+  answers: GeneratedAnswer[];
+  evaluations: EvaluationRecord[];
+  onSubmit: (answerId: number, event: FormEvent<HTMLFormElement>) => void;
+}>) {
+  if (answers.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="review-list">
+      <h3>CLEAR-RAG Scoring</h3>
+      {answers.map((answer) => {
+        const answerEvaluations = evaluations.filter((evaluation) => evaluation.generated_answer_id === answer.id);
+        return (
+          <div className="review-card" key={answer.id}>
+            <strong>{answer.model_name ?? "Generated answer"}</strong>
+            {answerEvaluations.length > 0 ? (
+              <div className="mini-list">
+                {answerEvaluations.map((evaluation) => (
+                  <div className="mini-list-item" key={evaluation.id}>
+                    <strong>Overall score: {evaluation.overall_score}</strong>
+                    <span>
+                      Citation {evaluation.citation_quality_score} / Latency {evaluation.latency_cost_score} / Faithfulness {evaluation.evidence_faithfulness_score} / Relevance {evaluation.answer_relevance_score} / Retrieval {evaluation.retrieval_quality_score}
+                    </span>
+                    {evaluation.reviewer_notes ? <p>{evaluation.reviewer_notes}</p> : null}
+                    {evaluation.suggested_improvement ? <span>{evaluation.suggested_improvement}</span> : null}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="muted">Not reviewed yet.</p>
+            )}
+            <form className="compact-form" onSubmit={(event) => onSubmit(answer.id, event)}>
+              <ScoreSelect name="citationQualityScore" label="Citation quality" />
+              <ScoreSelect name="latencyCostScore" label="Latency and cost" />
+              <ScoreSelect name="evidenceFaithfulnessScore" label="Evidence faithfulness" />
+              <ScoreSelect name="answerRelevanceScore" label="Answer relevance" />
+              <ScoreSelect name="retrievalQualityScore" label="Retrieval quality" />
+              <textarea name="reviewerNotes" placeholder="Reviewer notes" rows={3} />
+              <textarea name="suggestedImprovement" placeholder="Suggested improvement" rows={3} />
+              <button type="submit">Save CLEAR-RAG score</button>
+            </form>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ScoreSelect({ name, label }: Readonly<{ name: string; label: string }>) {
+  return (
+    <label>
+      {label}
+      <select name={name} defaultValue="5" required>
+        {scoreOptions.map((score) => (
+          <option key={score} value={score}>
+            {score}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 

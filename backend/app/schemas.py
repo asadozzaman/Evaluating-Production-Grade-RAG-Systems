@@ -207,3 +207,50 @@ class RagExecutionRead(BaseModel):
     retrieved_chunks_created: int
     generated_answers_created: int
     message: str
+
+
+class EvaluationRecordCreate(BaseModel):
+    citation_quality_score: int = Field(ge=1, le=5)
+    latency_cost_score: int = Field(ge=1, le=5)
+    evidence_faithfulness_score: int = Field(ge=1, le=5)
+    answer_relevance_score: int = Field(ge=1, le=5)
+    retrieval_quality_score: int = Field(ge=1, le=5)
+    reviewer_notes: str | None = None
+    suggested_improvement: str | None = None
+
+
+class EvaluationRecordUpdate(BaseModel):
+    citation_quality_score: int | None = Field(default=None, ge=1, le=5)
+    latency_cost_score: int | None = Field(default=None, ge=1, le=5)
+    evidence_faithfulness_score: int | None = Field(default=None, ge=1, le=5)
+    answer_relevance_score: int | None = Field(default=None, ge=1, le=5)
+    retrieval_quality_score: int | None = Field(default=None, ge=1, le=5)
+    reviewer_notes: str | None = None
+    suggested_improvement: str | None = None
+
+    @model_validator(mode="after")
+    def validate_scores(self) -> "EvaluationRecordUpdate":
+        score_fields = [
+            "citation_quality_score",
+            "latency_cost_score",
+            "evidence_faithfulness_score",
+            "answer_relevance_score",
+            "retrieval_quality_score",
+        ]
+        for field_name in score_fields:
+            if field_name in self.model_fields_set and getattr(self, field_name) is None:
+                raise ValueError(f"{field_name} cannot be null")
+        return self
+
+
+class EvaluationRecordRead(EvaluationRecordCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    evaluation_run_id: int
+    test_question_id: int
+    generated_answer_id: int
+    reviewer_user_id: int
+    overall_score: Decimal
+    created_at: datetime
+    updated_at: datetime
