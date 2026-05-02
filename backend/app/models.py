@@ -202,6 +202,10 @@ class EvaluationRun(Base):
     status: Mapped[str] = mapped_column(String(30), default="pending", server_default="pending", nullable=False)
     last_error: Mapped[str | None] = mapped_column(Text)
     processed_question_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    retrieval_mode: Mapped[str | None] = mapped_column(String(30))
+    generator_model_name: Mapped[str | None] = mapped_column(String(120))
+    embedding_model_name: Mapped[str | None] = mapped_column(String(120))
+    judge_model_name: Mapped[str | None] = mapped_column(String(120))
     created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

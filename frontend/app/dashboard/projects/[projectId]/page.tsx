@@ -8,6 +8,7 @@ import {
   DocumentIndexResult,
   EvaluationRun,
   Project,
+  RunComparison,
   SourceDocument,
   TOKEN_STORAGE_KEY,
   TestQuestion,
@@ -35,6 +36,9 @@ export default function ProjectDetailPage() {
   const [notice, setNotice] = useState("");
   const [documentSourceMode, setDocumentSourceMode] = useState<"uri" | "file">("uri");
   const [indexingDocumentId, setIndexingDocumentId] = useState<number | null>(null);
+  const [selectedRunIds, setSelectedRunIds] = useState<number[]>([]);
+  const [comparison, setComparison] = useState<RunComparison | null>(null);
+  const [isComparing, setIsComparing] = useState(false);
 
   const getToken = useCallback(() => {
     const token = localStorage.getItem(TOKEN_STORAGE_KEY);
@@ -62,6 +66,12 @@ export default function ProjectDetailPage() {
       setDocuments(documentData);
       setQuestions(questionData);
       setRuns(runData);
+      setSelectedRunIds((current) => {
+        if (current.length > 0) {
+          return current.filter((runId) => runData.some((run) => run.id === runId));
+        }
+        return runData.slice(0, 2).map((run) => run.id);
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to load project");
     }
@@ -201,7 +211,46 @@ export default function ProjectDetailPage() {
     }
   }
 
-  if (error) {
+  async function compareSelectedRuns() {
+    setError("");
+    setNotice("");
+    setComparison(null);
+    const token = getToken();
+    if (!token) {
+      return;
+    }
+    if (selectedRunIds.length < 2) {
+      setError("Select at least two runs to compare.");
+      return;
+    }
+
+    const params = new URLSearchParams();
+    selectedRunIds.forEach((runId) => params.append("run_ids", String(runId)));
+    setIsComparing(true);
+    try {
+      const result = await authRequest<RunComparison>(
+        `/projects/${projectId}/runs/compare?${params.toString()}`,
+        { method: "GET" },
+        token,
+      );
+      setComparison(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to compare runs");
+    } finally {
+      setIsComparing(false);
+    }
+  }
+
+  function toggleRunSelection(runId: number) {
+    setSelectedRunIds((current) => {
+      if (current.includes(runId)) {
+        return current.filter((selectedRunId) => selectedRunId !== runId);
+      }
+      return [...current, runId];
+    });
+  }
+
+  if (error && !project) {
     return (
       <main>
         <section className="shell">
@@ -334,9 +383,123 @@ export default function ProjectDetailPage() {
             />
           </SetupSection>
         </div>
+
+        <section className="status comparison-panel">
+          <div className="section-heading">
+            <h2>Run Comparison</h2>
+            <span>{selectedRunIds.length}</span>
+          </div>
+          <div className="comparison-selector">
+            {runs.length === 0 ? (
+              <p className="muted">Create at least two runs to compare experiments.</p>
+            ) : (
+              runs.map((run) => (
+                <label className="checkbox-row" key={run.id}>
+                  <input
+                    type="checkbox"
+                    checked={selectedRunIds.includes(run.id)}
+                    onChange={() => toggleRunSelection(run.id)}
+                  />
+                  <span>
+                    {run.name}
+                    {run.retrieval_mode ? ` / ${run.retrieval_mode}` : ""}
+                  </span>
+                </label>
+              ))
+            )}
+          </div>
+          <div className="actions compact-actions">
+            <button type="button" onClick={compareSelectedRuns} disabled={isComparing || selectedRunIds.length < 2}>
+              {isComparing ? "Comparing..." : "Compare selected runs"}
+            </button>
+          </div>
+          {comparison ? <RunComparisonView comparison={comparison} /> : null}
+        </section>
       </section>
     </main>
   );
+}
+
+function RunComparisonView({ comparison }: Readonly<{ comparison: RunComparison }>) {
+  return (
+    <div className="comparison-results">
+      <div className="metric-grid">
+        {comparison.runs.map((run) => (
+          <div className="metric-card" key={run.run_id}>
+            <span>{run.run_name}</span>
+            <strong>{run.average_overall_score ?? "Not scored"}</strong>
+            <small>
+              {[
+                run.retrieval_mode,
+                run.generator_model_name,
+                run.embedding_model_name,
+                run.judge_model_name,
+              ]
+                .filter(Boolean)
+                .join(" / ") || "No experiment metadata"}
+            </small>
+          </div>
+        ))}
+      </div>
+      <div className="dimension-list">
+        {comparison.runs.map((run) => (
+          <div className="dimension-row" key={run.run_id}>
+            <div className="status-row">
+              <span>{run.run_name}</span>
+              <span>{run.weakest_dimension ?? "No weakest dimension"}</span>
+            </div>
+            <p className="muted">
+              Generated {run.generated_answers}, reviewed {run.reviewed_answers}
+            </p>
+          </div>
+        ))}
+      </div>
+      {Object.entries(comparison.metric_deltas).length > 0 ? (
+        <div className="mini-list">
+          {Object.entries(comparison.metric_deltas).map(([runId, deltas]) => (
+            <div className="mini-list-item" key={runId}>
+              <strong>Run {runId} vs baseline {comparison.baseline_run_id}</strong>
+              <span>Overall delta: {formatDelta(deltas.overall_score_delta)}</span>
+              <span>
+                Citation {formatDelta(deltas.citation_quality_delta)} / Faithfulness{" "}
+                {formatDelta(deltas.evidence_faithfulness_delta)} / Relevance{" "}
+                {formatDelta(deltas.answer_relevance_delta)} / Retrieval{" "}
+                {formatDelta(deltas.retrieval_quality_delta)}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <div className="question-results">
+        <h3>Question-Level Comparison</h3>
+        {comparison.question_results.map((question) => (
+          <div className="mini-list-item" key={question.question_id}>
+            <strong>{question.question_text}</strong>
+            <span>
+              Best run: {question.best_run_id ? question.best_run_id : "Not enough scored answers"}
+            </span>
+            {question.run_results.map((result) => (
+              <p key={result.run_id}>
+                Run {result.run_id}: {result.overall_score ?? "Not scored"} /{" "}
+                {result.evaluation_mode ?? "not reviewed"} / {result.answer_text ?? "No answer"}
+              </p>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function formatDelta(value: string | null): string {
+  if (value === null) {
+    return "n/a";
+  }
+  const numericValue = Number(value);
+  if (numericValue > 0) {
+    return `+${value}`;
+  }
+  return value;
 }
 
 function SetupSection({

@@ -523,6 +523,43 @@ Run Automated CLEAR-RAG Evaluation
 
 Human scoring still works. Human records use `evaluation_mode: human`; automated records use `evaluation_mode: automated`, so reports can distinguish the source of a score.
 
+## Experiment Comparison and Benchmarking
+
+Phase 11 adds run comparison for benchmarking RAG experiments inside a project.
+
+Compare two or more runs:
+
+```text
+GET /projects/{project_id}/runs/compare?run_ids={run_id_a}&run_ids={run_id_b}
+```
+
+The comparison returns:
+
+```text
+run metadata
+retrieval mode
+generator model
+embedding model
+judge model
+generated and reviewed answer counts
+average overall score
+dimension averages
+weakest dimension
+score deltas against the baseline run
+question-level answers and best run
+```
+
+The project page now includes a Run Comparison panel. Select at least two runs, click Compare selected runs, and review the side-by-side scores and question-level differences.
+
+Run execution now persists experiment metadata on the run:
+
+```text
+retrieval_mode
+generator_model_name
+embedding_model_name
+judge_model_name
+```
+
 ## Start the Frontend
 
 In a separate terminal:

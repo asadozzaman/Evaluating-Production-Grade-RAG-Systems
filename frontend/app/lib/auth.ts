@@ -72,6 +72,10 @@ export type EvaluationRun = {
   status: "pending" | "running" | "completed" | "failed";
   last_error: string | null;
   processed_question_count: number;
+  retrieval_mode: "keyword" | "vector" | null;
+  generator_model_name: string | null;
+  embedding_model_name: string | null;
+  judge_model_name: string | null;
   created_by_user_id: number;
   created_at: string;
 };
@@ -178,6 +182,56 @@ export type RunSummary = {
   dimension_averages: DimensionScores;
   weakest_dimension: string | null;
   question_results: RunQuestionResult[];
+};
+
+export type RunComparisonRun = {
+  run_id: number;
+  run_name: string;
+  system_version: string | null;
+  retrieval_mode: "keyword" | "vector" | null;
+  generator_model_name: string | null;
+  embedding_model_name: string | null;
+  judge_model_name: string | null;
+  generated_answers: number;
+  reviewed_answers: number;
+  average_overall_score: string | null;
+  dimension_averages: DimensionScores;
+  weakest_dimension: string | null;
+};
+
+export type RunComparisonDeltas = {
+  overall_score_delta: string | null;
+  citation_quality_delta: string | null;
+  latency_cost_delta: string | null;
+  evidence_faithfulness_delta: string | null;
+  answer_relevance_delta: string | null;
+  retrieval_quality_delta: string | null;
+};
+
+export type RunComparisonQuestionRunResult = {
+  run_id: number;
+  answer_id: number | null;
+  answer_text: string | null;
+  overall_score: string | null;
+  reviewed: boolean;
+  evaluation_mode: "human" | "automated" | null;
+  judge_model_name: string | null;
+};
+
+export type RunComparisonQuestion = {
+  question_id: number;
+  question_text: string;
+  best_run_id: number | null;
+  run_results: RunComparisonQuestionRunResult[];
+};
+
+export type RunComparison = {
+  project_id: number;
+  baseline_run_id: number;
+  compared_run_ids: number[];
+  runs: RunComparisonRun[];
+  metric_deltas: Record<string, RunComparisonDeltas>;
+  question_results: RunComparisonQuestion[];
 };
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";

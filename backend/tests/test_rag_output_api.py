@@ -9,7 +9,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
 from app.main import app
-from app.models import Role, User
+from app.models import EvaluationRun, Role, User
 from app.security import hash_password
 from app.services.gemini import GeminiAnswer
 
@@ -707,3 +707,115 @@ def test_automated_clear_rag_evaluation_and_role_access(
     )
     assert repeated_evaluations.status_code == 200
     assert len(repeated_evaluations.json()) == 1
+
+
+def test_run_comparison_summarizes_experiment_deltas(
+    client_and_db: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, db_factory = client_and_db
+    create_user(db_factory, "admin@example.com", "admin")
+    create_user(db_factory, "viewer@example.com", "viewer")
+    admin_token = login(client, "admin@example.com")
+    viewer_token = login(client, "viewer@example.com")
+    graph = create_setup_graph(client, admin_token, "Run Comparison")
+
+    second_run = client.post(
+        f"/projects/{graph['project_id']}/runs",
+        json={"name": "Vector Evaluation", "system_version": "v2", "notes": "Vector retrieval run"},
+        headers=auth_headers(admin_token),
+    )
+    assert second_run.status_code == 201, second_run.text
+    second_run_id = second_run.json()["id"]
+
+    with db_factory() as db:
+        baseline = db.get(EvaluationRun, graph["run_id"])
+        vector = db.get(EvaluationRun, second_run_id)
+        assert baseline is not None
+        assert vector is not None
+        baseline.retrieval_mode = "keyword"
+        baseline.generator_model_name = "gemini-test"
+        vector.retrieval_mode = "vector"
+        vector.generator_model_name = "gemini-test"
+        vector.embedding_model_name = "gemini-embedding-001"
+        vector.judge_model_name = "gemini-judge-test"
+        db.commit()
+
+    for run_id, answer_text, scores in [
+        (
+            graph["run_id"],
+            "Employees receive 20 days of annual leave after one year.",
+            {
+                "citation_quality_score": 4,
+                "latency_cost_score": 4,
+                "evidence_faithfulness_score": 4,
+                "answer_relevance_score": 4,
+                "retrieval_quality_score": 4,
+            },
+        ),
+        (
+            second_run_id,
+            "Employees receive 20 days of annual leave after one year. [1]",
+            {
+                "citation_quality_score": 5,
+                "latency_cost_score": 4,
+                "evidence_faithfulness_score": 5,
+                "answer_relevance_score": 5,
+                "retrieval_quality_score": 5,
+            },
+        ),
+    ]:
+        answer = client.post(
+            f"/projects/{graph['project_id']}/runs/{run_id}/questions/{graph['question_id']}/generated-answers",
+            json={
+                "answer_text": answer_text,
+                "model_name": "gemini-test",
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "generation_time_ms": 900,
+                "estimated_cost": "0.000000",
+            },
+            headers=auth_headers(admin_token),
+        )
+        assert answer.status_code == 201, answer.text
+        evaluation = client.post(
+            f"/projects/{graph['project_id']}/runs/{run_id}/questions/{graph['question_id']}/answers/{answer.json()['id']}/evaluations",
+            json={
+                **scores,
+                "reviewer_notes": "Comparison score.",
+                "suggested_improvement": "Keep testing.",
+            },
+            headers=auth_headers(admin_token),
+        )
+        assert evaluation.status_code == 201, evaluation.text
+
+    viewer_compare = client.get(
+        f"/projects/{graph['project_id']}/runs/compare",
+        params=[("run_ids", graph["run_id"]), ("run_ids", second_run_id)],
+        headers=auth_headers(viewer_token),
+    )
+    assert viewer_compare.status_code == 200, viewer_compare.text
+    payload = viewer_compare.json()
+    assert payload["baseline_run_id"] == graph["run_id"]
+    assert payload["compared_run_ids"] == [graph["run_id"], second_run_id]
+    assert payload["runs"][0]["retrieval_mode"] == "keyword"
+    assert payload["runs"][1]["retrieval_mode"] == "vector"
+    assert payload["runs"][1]["embedding_model_name"] == "gemini-embedding-001"
+    assert payload["runs"][0]["average_overall_score"] == "4.00"
+    assert payload["runs"][1]["average_overall_score"] == "4.80"
+    assert payload["metric_deltas"][str(second_run_id)]["overall_score_delta"] == "0.80"
+    assert payload["metric_deltas"][str(second_run_id)]["retrieval_quality_delta"] == "1.00"
+    assert payload["question_results"][0]["best_run_id"] == second_run_id
+
+    duplicate_compare = client.get(
+        f"/projects/{graph['project_id']}/runs/compare",
+        params=[("run_ids", graph["run_id"]), ("run_ids", graph["run_id"])],
+        headers=auth_headers(admin_token),
+    )
+    assert duplicate_compare.status_code == 422
+
+    missing_compare = client.get(
+        f"/projects/{graph['project_id']}/runs/compare",
+        params=[("run_ids", graph["run_id"]), ("run_ids", 999999)],
+        headers=auth_headers(admin_token),
+    )
+    assert missing_compare.status_code == 404

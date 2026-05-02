@@ -177,6 +177,10 @@ class EvaluationRunRead(EvaluationRunCreate):
     status: Literal["pending", "running", "completed", "failed"]
     last_error: str | None
     processed_question_count: int
+    retrieval_mode: RetrievalMode | None
+    generator_model_name: str | None
+    embedding_model_name: str | None
+    judge_model_name: str | None
     created_by_user_id: int
     created_at: datetime
 
@@ -350,3 +354,53 @@ class ProjectSummaryRead(BaseModel):
     best_run: ProjectRunSummaryRead | None
     weakest_run: ProjectRunSummaryRead | None
     runs: list[ProjectRunSummaryRead]
+
+
+class RunComparisonRunRead(BaseModel):
+    run_id: int
+    run_name: str
+    system_version: str | None
+    retrieval_mode: RetrievalMode | None
+    generator_model_name: str | None
+    embedding_model_name: str | None
+    judge_model_name: str | None
+    generated_answers: int
+    reviewed_answers: int
+    average_overall_score: Decimal | None
+    dimension_averages: DimensionScores
+    weakest_dimension: str | None
+
+
+class RunComparisonDeltas(BaseModel):
+    overall_score_delta: Decimal | None
+    citation_quality_delta: Decimal | None
+    latency_cost_delta: Decimal | None
+    evidence_faithfulness_delta: Decimal | None
+    answer_relevance_delta: Decimal | None
+    retrieval_quality_delta: Decimal | None
+
+
+class RunComparisonQuestionRunResult(BaseModel):
+    run_id: int
+    answer_id: int | None
+    answer_text: str | None
+    overall_score: Decimal | None
+    reviewed: bool
+    evaluation_mode: EvaluationMode | None
+    judge_model_name: str | None
+
+
+class RunComparisonQuestionRead(BaseModel):
+    question_id: int
+    question_text: str
+    best_run_id: int | None
+    run_results: list[RunComparisonQuestionRunResult]
+
+
+class RunComparisonRead(BaseModel):
+    project_id: int
+    baseline_run_id: int
+    compared_run_ids: list[int]
+    runs: list[RunComparisonRunRead]
+    metric_deltas: dict[str, RunComparisonDeltas]
+    question_results: list[RunComparisonQuestionRead]

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.models import EvaluationRun, GeneratedAnswer, RetrievedChunk, SourceDocument, TestQuestion
 from app.services.document_processing import DocumentChunk, chunk_document, extract_document_text
-from app.services.gemini import GeminiAnswer, GeminiClient
+from app.services.gemini import GeminiAnswer, GeminiClient, normalize_model_name
 from app.services.retrieval import retrieve_top_chunks
 from app.services.vector_index import list_indexed_chunks, retrieve_vector_chunks
 
@@ -72,6 +72,9 @@ def execute_rag_run(
     run.status = "running"
     run.last_error = None
     run.processed_question_count = 0
+    run.retrieval_mode = retrieval_mode
+    run.generator_model_name = normalize_model_name(settings.default_llm_model)
+    run.embedding_model_name = normalize_model_name(settings.default_embedding_model) if retrieval_mode == "vector" else None
     db.commit()
 
     clear_previous_outputs(db, run.id)
@@ -105,7 +108,7 @@ def execute_rag_run(
     run.last_error = None
     db.commit()
 
-    model_name = settings.default_llm_model.strip() or "gemini-2.5-flash"
+    model_name = run.generator_model_name or normalize_model_name(settings.default_llm_model)
     return RagExecutionResult(
         run_id=run.id,
         status=run.status,

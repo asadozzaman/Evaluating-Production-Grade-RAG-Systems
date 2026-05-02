@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -34,6 +34,7 @@ from app.schemas import (
     ProjectSummaryRead,
     RagExecutionRequest,
     RagExecutionRead,
+    RunComparisonRead,
     RetrievedChunkCreate,
     RetrievedChunkRead,
     RunSummaryRead,
@@ -316,6 +317,109 @@ def build_project_summary(db: Session, project: Project) -> dict[str, object]:
         "best_run": best_run,
         "weakest_run": weakest_run,
         "runs": run_summaries,
+    }
+
+
+def score_delta(left: Decimal | None, right: Decimal | None) -> Decimal | None:
+    if left is None or right is None:
+        return None
+    return (left - right).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def better_run_id(run_summaries: list[dict[str, object]], score_key: str = "average_overall_score") -> int | None:
+    scored = [summary for summary in run_summaries if summary[score_key] is not None]
+    if not scored:
+        return None
+    best = max(scored, key=lambda item: item[score_key])
+    return int(best["run_id"])
+
+
+def build_run_comparison(db: Session, project: Project, runs: list[EvaluationRun]) -> dict[str, object]:
+    summaries = [build_run_summary(db, project, run) for run in runs]
+    summary_by_run_id = {summary["run_id"]: summary for summary in summaries}
+
+    run_results = []
+    for run in runs:
+        summary = summary_by_run_id[run.id]
+        run_results.append(
+            {
+                "run_id": run.id,
+                "run_name": run.name,
+                "system_version": run.system_version,
+                "retrieval_mode": run.retrieval_mode,
+                "generator_model_name": run.generator_model_name,
+                "embedding_model_name": run.embedding_model_name,
+                "judge_model_name": run.judge_model_name,
+                "generated_answers": summary["generated_answers"],
+                "reviewed_answers": summary["reviewed_answers"],
+                "average_overall_score": summary["average_overall_score"],
+                "dimension_averages": summary["dimension_averages"],
+                "weakest_dimension": summary["weakest_dimension"],
+            }
+        )
+
+    baseline_summary = summaries[0]
+    metric_deltas = {}
+    for summary in summaries[1:]:
+        metric_deltas[str(summary["run_id"])] = {
+            "overall_score_delta": score_delta(summary["average_overall_score"], baseline_summary["average_overall_score"]),
+            "citation_quality_delta": score_delta(
+                summary["dimension_averages"]["citation_quality_score"],
+                baseline_summary["dimension_averages"]["citation_quality_score"],
+            ),
+            "latency_cost_delta": score_delta(
+                summary["dimension_averages"]["latency_cost_score"],
+                baseline_summary["dimension_averages"]["latency_cost_score"],
+            ),
+            "evidence_faithfulness_delta": score_delta(
+                summary["dimension_averages"]["evidence_faithfulness_score"],
+                baseline_summary["dimension_averages"]["evidence_faithfulness_score"],
+            ),
+            "answer_relevance_delta": score_delta(
+                summary["dimension_averages"]["answer_relevance_score"],
+                baseline_summary["dimension_averages"]["answer_relevance_score"],
+            ),
+            "retrieval_quality_delta": score_delta(
+                summary["dimension_averages"]["retrieval_quality_score"],
+                baseline_summary["dimension_averages"]["retrieval_quality_score"],
+            ),
+        }
+
+    question_map: dict[int, dict[str, object]] = {}
+    for summary in summaries:
+        for result in summary["question_results"]:
+            question_entry = question_map.setdefault(
+                result["question_id"],
+                {
+                    "question_id": result["question_id"],
+                    "question_text": result["question_text"],
+                    "run_results": [],
+                },
+            )
+            question_entry["run_results"].append(
+                {
+                    "run_id": summary["run_id"],
+                    "answer_id": result["answer_id"],
+                    "answer_text": result["answer_text"],
+                    "overall_score": result["overall_score"],
+                    "reviewed": result["reviewed"],
+                    "evaluation_mode": result["evaluation_mode"],
+                    "judge_model_name": result["judge_model_name"],
+                }
+            )
+
+    question_results = []
+    for item in question_map.values():
+        item["best_run_id"] = better_run_id(item["run_results"], score_key="overall_score")
+        question_results.append(item)
+
+    return {
+        "project_id": project.id,
+        "baseline_run_id": runs[0].id,
+        "compared_run_ids": [run.id for run in runs],
+        "runs": run_results,
+        "metric_deltas": metric_deltas,
+        "question_results": sorted(question_results, key=lambda item: item["question_id"]),
     }
 
 
@@ -706,6 +810,36 @@ def list_runs(
     )
 
 
+@router.get("/{project_id}/runs/compare", response_model=RunComparisonRead)
+def compare_runs(
+    project_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+    run_ids: Annotated[list[int], Query(min_length=2)],
+) -> dict[str, object]:
+    project = get_project_or_404(db, project_id)
+    unique_run_ids = list(dict.fromkeys(run_ids))
+    if len(unique_run_ids) < 2:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Select at least two different runs to compare.",
+        )
+    runs = list(
+        db.scalars(
+            select(EvaluationRun)
+            .where(EvaluationRun.project_id == project_id, EvaluationRun.id.in_(unique_run_ids))
+            .order_by(EvaluationRun.created_at.asc(), EvaluationRun.id.asc())
+        ).all()
+    )
+    found_run_ids = {run.id for run in runs}
+    missing_run_ids = [run_id for run_id in unique_run_ids if run_id not in found_run_ids]
+    if missing_run_ids:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="One or more runs were not found in this project.")
+
+    ordered_runs = sorted(runs, key=lambda run: unique_run_ids.index(run.id))
+    return build_run_comparison(db, project, ordered_runs)
+
+
 @router.get("/{project_id}/runs/{run_id}", response_model=EvaluationRunRead)
 def read_run(
     project_id: int,
@@ -934,6 +1068,7 @@ def auto_evaluate_run(
             evaluation.overall_score = calculate_overall_score(evaluation)
             db.add(evaluation)
             evaluated_answers += 1
+        run.judge_model_name = judge_model_name
         db.commit()
     except Exception as exc:
         db.rollback()
