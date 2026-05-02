@@ -47,6 +47,7 @@ QuestionType = Literal["simple_factual", "conditional", "multi_document", "ambig
 SourceKind = Literal["uri", "file"]
 RelevanceLabel = Literal["high", "medium", "low", "irrelevant"]
 RetrievalMode = Literal["keyword", "vector"]
+EvaluationMode = Literal["human", "automated"]
 
 
 class ProjectCreate(BaseModel):
@@ -278,8 +279,21 @@ class EvaluationRecordRead(EvaluationRecordCreate):
     generated_answer_id: int
     reviewer_user_id: int
     overall_score: Decimal
+    evaluation_mode: EvaluationMode
+    judge_model_name: str | None
+    judge_reasoning: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class AutoEvaluationRunRead(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    run_id: int
+    evaluated_answers: int
+    skipped_answers: int
+    judge_model_name: str
+    message: str
 
 
 class DimensionScores(BaseModel):
@@ -302,6 +316,8 @@ class RunQuestionResult(BaseModel):
     evidence_faithfulness_score: int | None
     answer_relevance_score: int | None
     retrieval_quality_score: int | None
+    evaluation_mode: EvaluationMode | None
+    judge_model_name: str | None
 
 
 class RunSummaryRead(BaseModel):

@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user, require_roles
@@ -17,6 +17,7 @@ from app.database import get_db
 from app.models import DocumentChunk, EvaluationRecord, EvaluationRun, Project, SourceDocument, TestQuestion, User
 from app.models import GeneratedAnswer, RetrievedChunk
 from app.schemas import (
+    AutoEvaluationRunRead,
     DocumentChunkRead,
     DocumentIndexRead,
     EvaluationRecordCreate,
@@ -43,6 +44,8 @@ from app.schemas import (
     TestQuestionRead,
     TestQuestionUpdate,
 )
+from app.services.clear_rag_judge import judge_clear_rag_answer
+from app.services.gemini import GeminiClient
 from app.services.rag_execution import RagExecutionError, execute_rag_run
 from app.services.vector_index import index_source_document
 
@@ -256,6 +259,8 @@ def build_run_summary(db: Session, project: Project, run: EvaluationRun) -> dict
                 "evidence_faithfulness_score": latest_evaluation.evidence_faithfulness_score if latest_evaluation else None,
                 "answer_relevance_score": latest_evaluation.answer_relevance_score if latest_evaluation else None,
                 "retrieval_quality_score": latest_evaluation.retrieval_quality_score if latest_evaluation else None,
+                "evaluation_mode": latest_evaluation.evaluation_mode if latest_evaluation else None,
+                "judge_model_name": latest_evaluation.judge_model_name if latest_evaluation else None,
             }
         )
 
@@ -761,6 +766,8 @@ def export_run_csv(
             "evidence_faithfulness_score",
             "answer_relevance_score",
             "retrieval_quality_score",
+            "evaluation_mode",
+            "judge_model_name",
         ]
     )
     for row in summary["question_results"]:
@@ -777,6 +784,8 @@ def export_run_csv(
                 row["evidence_faithfulness_score"],
                 row["answer_relevance_score"],
                 row["retrieval_quality_score"],
+                row["evaluation_mode"],
+                row["judge_model_name"],
             ]
         )
 
@@ -842,6 +851,100 @@ def execute_run(
         "generated_answers_created": result.generated_answers_created,
         "retrieval_mode": result.retrieval_mode,
         "message": result.message,
+    }
+
+
+@router.post("/{project_id}/runs/{run_id}/auto-evaluate", response_model=AutoEvaluationRunRead)
+def auto_evaluate_run(
+    project_id: int,
+    run_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: WritableUser,
+) -> dict[str, object]:
+    get_project_or_404(db, project_id)
+    run = get_run_or_404(db, project_id, run_id)
+    answers = list(
+        db.scalars(
+            select(GeneratedAnswer)
+            .where(GeneratedAnswer.evaluation_run_id == run.id)
+            .order_by(GeneratedAnswer.created_at.asc(), GeneratedAnswer.id.asc())
+        ).all()
+    )
+    if not answers:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Run Gemini RAG or add generated answers before automated evaluation.",
+        )
+
+    questions = {
+        question.id: question
+        for question in db.scalars(select(TestQuestion).where(TestQuestion.project_id == project_id)).all()
+    }
+    chunks_by_question: dict[int, list[RetrievedChunk]] = {}
+    for chunk in db.scalars(
+        select(RetrievedChunk)
+        .where(RetrievedChunk.evaluation_run_id == run.id)
+        .order_by(RetrievedChunk.test_question_id.asc(), RetrievedChunk.rank.asc(), RetrievedChunk.id.asc())
+    ).all():
+        chunks_by_question.setdefault(chunk.test_question_id, []).append(chunk)
+
+    settings = get_settings()
+    client = GeminiClient(settings)
+    db.execute(
+        delete(EvaluationRecord).where(
+            EvaluationRecord.evaluation_run_id == run.id,
+            EvaluationRecord.evaluation_mode == "automated",
+        )
+    )
+
+    evaluated_answers = 0
+    skipped_answers = 0
+    judge_model_name = settings.default_llm_model
+    try:
+        for answer in answers:
+            question = questions.get(answer.test_question_id)
+            if question is None:
+                skipped_answers += 1
+                continue
+
+            judgment = judge_clear_rag_answer(
+                question=question,
+                answer=answer,
+                chunks=chunks_by_question.get(question.id, []),
+                client=client,
+            )
+            judge_model_name = judgment.judge_model_name
+            evaluation = EvaluationRecord(
+                evaluation_run_id=run.id,
+                test_question_id=question.id,
+                generated_answer_id=answer.id,
+                reviewer_user_id=current_user.id,
+                citation_quality_score=judgment.citation_quality_score,
+                latency_cost_score=judgment.latency_cost_score,
+                evidence_faithfulness_score=judgment.evidence_faithfulness_score,
+                answer_relevance_score=judgment.answer_relevance_score,
+                retrieval_quality_score=judgment.retrieval_quality_score,
+                overall_score=Decimal("1.00"),
+                reviewer_notes=judgment.reviewer_notes,
+                suggested_improvement=judgment.suggested_improvement,
+                evaluation_mode="automated",
+                judge_model_name=judgment.judge_model_name,
+                judge_reasoning=judgment.judge_reasoning,
+            )
+            evaluation.overall_score = calculate_overall_score(evaluation)
+            db.add(evaluation)
+            evaluated_answers += 1
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    return {
+        "run_id": run.id,
+        "evaluated_answers": evaluated_answers,
+        "skipped_answers": skipped_answers,
+        "judge_model_name": judge_model_name,
+        "message": "Automated CLEAR-RAG evaluation completed.",
     }
 
 

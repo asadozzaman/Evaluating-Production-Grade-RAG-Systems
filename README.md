@@ -481,6 +481,48 @@ The frontend flow is:
 
 Embeddings are stored in PostgreSQL as persistent document chunks, and retrieval uses cosine similarity in the backend. The current Docker service remains the standard PostgreSQL image; pgvector can be added later as a production hardening step.
 
+## Automated CLEAR-RAG Evaluation
+
+Phase 10 adds LLM-as-judge scoring for generated answers. Admins and evaluators can run automated CLEAR-RAG evaluation after a run has generated answers:
+
+```text
+POST /projects/{project_id}/runs/{run_id}/auto-evaluate
+```
+
+The judge reads:
+
+```text
+test question
+expected source
+retrieved chunks
+generated answer
+token, latency, and cost metadata
+```
+
+It stores an evaluation record with:
+
+```text
+Citation Quality score
+Latency and Cost Efficiency score
+Evidence Faithfulness score
+Answer Relevance score
+Retrieval Quality score
+overall score
+judge model name
+judge reasoning
+reviewer notes
+suggested improvement
+evaluation mode: automated
+```
+
+The frontend run page now includes:
+
+```text
+Run Automated CLEAR-RAG Evaluation
+```
+
+Human scoring still works. Human records use `evaluation_mode: human`; automated records use `evaluation_mode: automated`, so reports can distinguish the source of a score.
+
 ## Start the Frontend
 
 In a separate terminal:

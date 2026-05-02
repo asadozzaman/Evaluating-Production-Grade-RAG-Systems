@@ -108,6 +108,9 @@ export type EvaluationRecord = {
   test_question_id: number;
   generated_answer_id: number;
   reviewer_user_id: number;
+  evaluation_mode: "human" | "automated";
+  judge_model_name: string | null;
+  judge_reasoning: string | null;
   citation_quality_score: number;
   latency_cost_score: number;
   evidence_faithfulness_score: number;
@@ -118,6 +121,14 @@ export type EvaluationRecord = {
   suggested_improvement: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type AutoEvaluationResult = {
+  run_id: number;
+  evaluated_answers: number;
+  skipped_answers: number;
+  judge_model_name: string;
+  message: string;
 };
 
 export type RagExecutionResult = {
@@ -151,6 +162,8 @@ export type RunQuestionResult = {
   evidence_faithfulness_score: number | null;
   answer_relevance_score: number | null;
   retrieval_quality_score: number | null;
+  evaluation_mode: "human" | "automated" | null;
+  judge_model_name: string | null;
 };
 
 export type RunSummary = {

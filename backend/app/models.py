@@ -323,6 +323,7 @@ class EvaluationRecord(TimestampMixin, Base):
         CheckConstraint("answer_relevance_score BETWEEN 1 AND 5", name="ck_evaluation_records_answer_relevance_score"),
         CheckConstraint("retrieval_quality_score BETWEEN 1 AND 5", name="ck_evaluation_records_retrieval_quality_score"),
         CheckConstraint("overall_score BETWEEN 1 AND 5", name="ck_evaluation_records_overall_score"),
+        CheckConstraint("evaluation_mode IN ('human', 'automated')", name="ck_evaluation_records_evaluation_mode"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -350,6 +351,9 @@ class EvaluationRecord(TimestampMixin, Base):
     overall_score: Mapped[Decimal] = mapped_column(Numeric(3, 2), nullable=False)
     reviewer_notes: Mapped[str | None] = mapped_column(Text)
     suggested_improvement: Mapped[str | None] = mapped_column(Text)
+    evaluation_mode: Mapped[str] = mapped_column(String(30), default="human", server_default="human", nullable=False)
+    judge_model_name: Mapped[str | None] = mapped_column(String(120))
+    judge_reasoning: Mapped[str | None] = mapped_column(Text)
 
     evaluation_run: Mapped[EvaluationRun] = relationship(back_populates="evaluation_records")
     test_question: Mapped[TestQuestion] = relationship(back_populates="evaluation_records")

@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   API_URL,
+  AutoEvaluationResult,
   EvaluationRun,
   EvaluationRecord,
   GeneratedAnswer,
@@ -47,8 +48,10 @@ export default function RunOutputPage() {
   const [evaluations, setEvaluations] = useState<EvaluationRecord[]>([]);
   const [summary, setSummary] = useState<RunSummary | null>(null);
   const [executionResult, setExecutionResult] = useState<RagExecutionResult | null>(null);
+  const [autoEvaluationResult, setAutoEvaluationResult] = useState<AutoEvaluationResult | null>(null);
   const [retrievalMode, setRetrievalMode] = useState<"keyword" | "vector">("keyword");
   const [isExecuting, setIsExecuting] = useState(false);
+  const [isAutoEvaluating, setIsAutoEvaluating] = useState(false);
   const [error, setError] = useState("");
 
   const selectedQuestion = useMemo(
@@ -257,6 +260,33 @@ export default function RunOutputPage() {
     }
   }
 
+  async function runAutomatedEvaluation() {
+    setError("");
+    setAutoEvaluationResult(null);
+    const token = getToken();
+    if (!token) {
+      return;
+    }
+
+    setIsAutoEvaluating(true);
+    try {
+      const result = await authRequest<AutoEvaluationResult>(
+        `/projects/${projectId}/runs/${runId}/auto-evaluate`,
+        { method: "POST" },
+        token,
+      );
+      setAutoEvaluationResult(result);
+      if (selectedQuestionId) {
+        await loadOutputs(selectedQuestionId);
+      }
+      await loadSummary();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to run automated CLEAR-RAG evaluation");
+    } finally {
+      setIsAutoEvaluating(false);
+    }
+  }
+
   async function submitEvaluation(answerId: number, event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
@@ -387,10 +417,18 @@ export default function RunOutputPage() {
             <button type="button" onClick={executeGeminiRag} disabled={isExecuting || documents.length === 0 || questions.length === 0}>
               {isExecuting ? "Running Gemini RAG..." : "Run Gemini RAG"}
             </button>
+            <button type="button" onClick={runAutomatedEvaluation} disabled={isAutoEvaluating || answers.length === 0}>
+              {isAutoEvaluating ? "Evaluating..." : "Run Automated CLEAR-RAG Evaluation"}
+            </button>
           </div>
           {executionResult ? (
             <p className="muted">
               {executionResult.message} {executionResult.retrieved_chunks_created} chunks and {executionResult.generated_answers_created} answers saved with {executionResult.model_name}.
+            </p>
+          ) : null}
+          {autoEvaluationResult ? (
+            <p className="muted">
+              {autoEvaluationResult.message} {autoEvaluationResult.evaluated_answers} answers scored with {autoEvaluationResult.judge_model_name}.
             </p>
           ) : null}
         </div>
@@ -555,6 +593,12 @@ function RunAnalytics({
           <div className="mini-list-item" key={result.question_id}>
             <strong>{result.question_text}</strong>
             <span>{result.reviewed ? `Reviewed / Overall ${result.overall_score}` : "Not reviewed"}</span>
+            {result.evaluation_mode ? (
+              <span>
+                {result.evaluation_mode === "automated" ? "Automated judge" : "Human review"}
+                {result.judge_model_name ? ` / ${result.judge_model_name}` : ""}
+              </span>
+            ) : null}
             {result.answer_text ? <p>{result.answer_text}</p> : <p>No generated answer yet.</p>}
           </div>
         ))}
@@ -619,9 +663,14 @@ function EvaluationReviewList({
                   <div className="mini-list-item" key={evaluation.id}>
                     <strong>Overall score: {evaluation.overall_score}</strong>
                     <span>
+                      {evaluation.evaluation_mode === "automated" ? "Automated judge" : "Human review"}
+                      {evaluation.judge_model_name ? ` / ${evaluation.judge_model_name}` : ""}
+                    </span>
+                    <span>
                       Citation {evaluation.citation_quality_score} / Latency {evaluation.latency_cost_score} / Faithfulness {evaluation.evidence_faithfulness_score} / Relevance {evaluation.answer_relevance_score} / Retrieval {evaluation.retrieval_quality_score}
                     </span>
                     {evaluation.reviewer_notes ? <p>{evaluation.reviewer_notes}</p> : null}
+                    {evaluation.judge_reasoning ? <p>{evaluation.judge_reasoning}</p> : null}
                     {evaluation.suggested_improvement ? <span>{evaluation.suggested_improvement}</span> : null}
                   </div>
                 ))}

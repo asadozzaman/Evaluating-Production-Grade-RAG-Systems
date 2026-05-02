@@ -504,6 +504,7 @@ def test_clear_rag_evaluation_scoring_and_role_access(
     assert evaluation.status_code == 201, evaluation.text
     evaluation_payload = evaluation.json()
     assert evaluation_payload["overall_score"] == "4.60"
+    assert evaluation_payload["evaluation_mode"] == "human"
     assert evaluation_payload["reviewer_notes"] == "Accurate and grounded in evidence."
 
     invalid_score = client.post(
@@ -585,3 +586,124 @@ def test_clear_rag_evaluation_scoring_and_role_access(
         headers=auth_headers(admin_token),
     )
     assert delete_evaluation.status_code == 204
+
+
+def test_automated_clear_rag_evaluation_and_role_access(
+    client_and_db: tuple[TestClient, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeGeminiJudgeClient:
+        def __init__(self, settings: object) -> None:
+            self.settings = settings
+
+        def generate_answer(self, prompt: str) -> GeminiAnswer:
+            assert "Full-time employees receive 20 days" in prompt
+            return GeminiAnswer(
+                text=(
+                    "{"
+                    '"citation_quality_score": 5,'
+                    '"latency_cost_score": 4,'
+                    '"evidence_faithfulness_score": 5,'
+                    '"answer_relevance_score": 5,'
+                    '"retrieval_quality_score": 4,'
+                    '"reviewer_notes": "Answer is grounded in retrieved policy evidence.",'
+                    '"suggested_improvement": "Keep the citation tied to the exact policy section.",'
+                    '"judge_reasoning": "The answer directly uses the retrieved annual leave evidence."'
+                    "}"
+                ),
+                model_name="gemini-judge-test",
+                input_tokens=120,
+                output_tokens=80,
+                generation_time_ms=20,
+            )
+
+    monkeypatch.setattr("app.routers.projects.GeminiClient", FakeGeminiJudgeClient)
+
+    client, db_factory = client_and_db
+    create_user(db_factory, "admin@example.com", "admin")
+    create_user(db_factory, "viewer@example.com", "viewer")
+    admin_token = login(client, "admin@example.com")
+    viewer_token = login(client, "viewer@example.com")
+    graph = create_setup_graph(client, admin_token, "Automated CLEAR-RAG Scoring")
+
+    no_answers = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/auto-evaluate",
+        headers=auth_headers(admin_token),
+    )
+    assert no_answers.status_code == 422
+
+    chunk_path = (
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}"
+        f"/questions/{graph['question_id']}/retrieved-chunks"
+    )
+    chunk = client.post(
+        chunk_path,
+        json={
+            "source_document_id": graph["document_id"],
+            "rank": 1,
+            "chunk_text": "Full-time employees receive 20 days of annual leave after one year.",
+            "section_reference": "Section 3.1",
+            "relevance_label": "high",
+            "retrieval_time_ms": 12,
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert chunk.status_code == 201, chunk.text
+
+    answer_path = (
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}"
+        f"/questions/{graph['question_id']}/generated-answers"
+    )
+    answer = client.post(
+        answer_path,
+        json={
+            "answer_text": "Full-time employees receive 20 days of annual leave after one year. [1]",
+            "model_name": "gemini-test",
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "generation_time_ms": 900,
+            "estimated_cost": "0.000000",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert answer.status_code == 201, answer.text
+
+    viewer_auto_eval = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/auto-evaluate",
+        headers=auth_headers(viewer_token),
+    )
+    assert viewer_auto_eval.status_code == 403
+
+    auto_eval = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/auto-evaluate",
+        headers=auth_headers(admin_token),
+    )
+    assert auto_eval.status_code == 200, auto_eval.text
+    auto_eval_payload = auto_eval.json()
+    assert auto_eval_payload["evaluated_answers"] == 1
+    assert auto_eval_payload["skipped_answers"] == 0
+    assert auto_eval_payload["judge_model_name"] == "gemini-judge-test"
+
+    evaluations = client.get(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/evaluations",
+        headers=auth_headers(viewer_token),
+    )
+    assert evaluations.status_code == 200, evaluations.text
+    payload = evaluations.json()
+    assert len(payload) == 1
+    assert payload[0]["evaluation_mode"] == "automated"
+    assert payload[0]["overall_score"] == "4.60"
+    assert payload[0]["judge_model_name"] == "gemini-judge-test"
+    assert payload[0]["judge_reasoning"] == "The answer directly uses the retrieved annual leave evidence."
+
+    repeat_auto_eval = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/auto-evaluate",
+        headers=auth_headers(admin_token),
+    )
+    assert repeat_auto_eval.status_code == 200
+    repeated_evaluations = client.get(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/evaluations",
+        headers=auth_headers(viewer_token),
+    )
+    assert repeated_evaluations.status_code == 200
+    assert len(repeated_evaluations.json()) == 1
