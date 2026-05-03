@@ -204,6 +204,7 @@ class TestQuestion(TimestampMixin, Base):
     retrieved_chunks: Mapped[list["RetrievedChunk"]] = relationship(back_populates="test_question")
     generated_answers: Mapped[list["GeneratedAnswer"]] = relationship(back_populates="test_question")
     evaluation_records: Mapped[list["EvaluationRecord"]] = relationship(back_populates="test_question")
+    error_annotations: Mapped[list["ErrorAnnotation"]] = relationship(back_populates="test_question")
 
 
 class EvaluationRun(Base):
@@ -261,6 +262,10 @@ class EvaluationRun(Base):
         cascade="all, delete-orphan",
     )
     evaluation_records: Mapped[list["EvaluationRecord"]] = relationship(
+        back_populates="evaluation_run",
+        cascade="all, delete-orphan",
+    )
+    error_annotations: Mapped[list["ErrorAnnotation"]] = relationship(
         back_populates="evaluation_run",
         cascade="all, delete-orphan",
     )
@@ -349,6 +354,7 @@ class GeneratedAnswer(Base):
     evaluation_run: Mapped[EvaluationRun] = relationship(back_populates="generated_answers")
     test_question: Mapped[TestQuestion] = relationship(back_populates="generated_answers")
     evaluation_records: Mapped[list["EvaluationRecord"]] = relationship(back_populates="generated_answer")
+    error_annotations: Mapped[list["ErrorAnnotation"]] = relationship(back_populates="generated_answer")
 
 
 class EvaluationRecord(TimestampMixin, Base):
@@ -409,3 +415,55 @@ class EvaluationRecord(TimestampMixin, Base):
     generated_answer: Mapped[GeneratedAnswer] = relationship(back_populates="evaluation_records")
     reviewer: Mapped[User] = relationship(foreign_keys=[reviewer_user_id])
     reviewed_by: Mapped[User | None] = relationship(foreign_keys=[reviewed_by_user_id])
+    error_annotations: Mapped[list["ErrorAnnotation"]] = relationship(back_populates="evaluation_record")
+
+
+class ErrorAnnotation(TimestampMixin, Base):
+    __tablename__ = "error_annotations"
+    __table_args__ = (
+        CheckConstraint(
+            "category IN ('retrieval_miss', 'citation_error', 'hallucination', 'incomplete_answer', 'irrelevant_answer', 'contradiction', 'latency_cost', 'format_error', 'policy_ambiguity', 'other')",
+            name="ck_error_annotations_category",
+        ),
+        CheckConstraint(
+            "severity IN ('low', 'medium', 'high', 'critical')",
+            name="ck_error_annotations_severity",
+        ),
+        CheckConstraint(
+            "source IN ('human', 'automated')",
+            name="ck_error_annotations_source",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    evaluation_run_id: Mapped[int] = mapped_column(
+        ForeignKey("evaluation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    test_question_id: Mapped[int] = mapped_column(
+        ForeignKey("test_questions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    generated_answer_id: Mapped[int] = mapped_column(
+        ForeignKey("generated_answers.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    evaluation_record_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evaluation_records.id", ondelete="SET NULL"),
+        index=True,
+    )
+    created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
+    category: Mapped[str] = mapped_column(String(40), nullable=False)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False)
+    source: Mapped[str] = mapped_column(String(20), default="human", server_default="human", nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    evidence_reference: Mapped[str | None] = mapped_column(Text)
+
+    evaluation_run: Mapped[EvaluationRun] = relationship(back_populates="error_annotations")
+    test_question: Mapped[TestQuestion] = relationship(back_populates="error_annotations")
+    generated_answer: Mapped[GeneratedAnswer] = relationship(back_populates="error_annotations")
+    evaluation_record: Mapped[EvaluationRecord | None] = relationship(back_populates="error_annotations")
+    created_by: Mapped[User] = relationship(foreign_keys=[created_by_user_id])

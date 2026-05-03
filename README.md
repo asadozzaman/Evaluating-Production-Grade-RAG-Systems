@@ -788,6 +788,151 @@ missing_evidence
 
 The run page now shows a Retrieval Metrics section inside Evaluation Summary, including hit rate, Precision@3, Recall@3, MRR, chunk coverage, and missing evidence.
 
+## Judge Calibration and Human Agreement
+
+Phase 16 compares automated CLEAR-RAG judge scores with human CLEAR-RAG scores for the same generated answer.
+
+Calibration endpoint:
+
+```text
+GET /projects/{project_id}/runs/{run_id}/judge-calibration
+```
+
+The report returns:
+
+```text
+paired_answer_count
+automated_only_count
+human_only_count
+overall_exact_agreement_percent
+overall_within_one_agreement_percent
+average_overall_delta
+dimension_calibration
+answer_comparisons
+```
+
+How pairing works:
+
+```text
+1. Run automated CLEAR-RAG evaluation for generated answers.
+2. Add a human CLEAR-RAG score for the same answer.
+3. The calibration report pairs the latest automated score with the latest approved human score.
+4. Deltas are calculated as human score minus automated score.
+```
+
+Bias direction:
+
+```text
+aligned: average human and automated scores match
+automated_under_scores: human scores are higher than automated scores
+automated_over_scores: automated scores are higher than human scores
+```
+
+The run page now includes a Judge Calibration panel with paired answers, exact agreement, within-one-point agreement, average score delta, dimension bias, and answer-level comparisons.
+
+## Error Taxonomy
+
+Phase 17 adds structured error tagging so evaluators can classify why a RAG answer failed.
+
+Taxonomy summary endpoint:
+
+```text
+GET /projects/{project_id}/runs/{run_id}/error-taxonomy
+```
+
+Create an error tag for an answer:
+
+```text
+POST /projects/{project_id}/runs/{run_id}/questions/{question_id}/answers/{answer_id}/errors
+```
+
+Example request:
+
+```json
+{
+  "category": "citation_error",
+  "severity": "high",
+  "evaluation_record_id": 83,
+  "notes": "Answer cites the policy document but not the exact leave section.",
+  "evidence_reference": "Expected Section 1.1"
+}
+```
+
+Supported categories:
+
+```text
+retrieval_miss
+citation_error
+hallucination
+incomplete_answer
+irrelevant_answer
+contradiction
+latency_cost
+format_error
+policy_ambiguity
+other
+```
+
+Supported severities:
+
+```text
+low
+medium
+high
+critical
+```
+
+The run page now includes an Error Taxonomy panel and an Add error tag form under each generated answer.
+
+## Experiment Leaderboard
+
+Phase 18 adds a project-level leaderboard for ranking RAG experiment runs.
+
+Leaderboard endpoint:
+
+```text
+GET /projects/{project_id}/leaderboard
+```
+
+The leaderboard ranks runs using:
+
+```text
+CLEAR-RAG average score
+review completion
+retrieval hit rate
+judge calibration within-one agreement
+error taxonomy penalties
+```
+
+Each run includes:
+
+```text
+rank
+leaderboard_score
+quality_gate
+generated_answers
+reviewed_answers
+approved_average_overall_score
+retrieval_hit_rate
+retrieval_mrr
+judge agreement metrics
+error counts
+model and retrieval metadata
+```
+
+Quality gate values:
+
+```text
+no_outputs
+blocked_critical_errors
+needs_error_review
+needs_review
+release_candidate
+scored
+```
+
+The project page now includes an Experiment Leaderboard panel above Run Comparison.
+
 ## Start the Frontend
 
 In a separate terminal:

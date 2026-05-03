@@ -867,6 +867,259 @@ def test_automated_clear_rag_evaluation_and_role_access(
     assert len(repeated_evaluations.json()) == 1
 
 
+def test_judge_calibration_summarizes_human_agreement(
+    client_and_db: tuple[TestClient, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeGeminiJudgeClient:
+        def __init__(self, settings: object) -> None:
+            self.settings = settings
+
+        def generate_answer(self, prompt: str) -> GeminiAnswer:
+            assert "Full-time employees receive 20 days" in prompt
+            return GeminiAnswer(
+                text=(
+                    "{"
+                    '"citation_quality_score": 5,'
+                    '"latency_cost_score": 4,'
+                    '"evidence_faithfulness_score": 5,'
+                    '"answer_relevance_score": 5,'
+                    '"retrieval_quality_score": 4,'
+                    '"reviewer_notes": "Automated judge score for calibration.",'
+                    '"suggested_improvement": "Keep citation references specific.",'
+                    '"judge_reasoning": "The answer uses the retrieved leave policy evidence."'
+                    "}"
+                ),
+                model_name="gemini-calibration-test",
+                input_tokens=110,
+                output_tokens=70,
+                generation_time_ms=18,
+            )
+
+    monkeypatch.setattr("app.routers.projects.GeminiClient", FakeGeminiJudgeClient)
+
+    client, db_factory = client_and_db
+    create_user(db_factory, "admin@example.com", "admin")
+    create_user(db_factory, "viewer@example.com", "viewer")
+    admin_token = login(client, "admin@example.com")
+    viewer_token = login(client, "viewer@example.com")
+    graph = create_setup_graph(client, admin_token, "Judge Calibration")
+
+    chunk = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/questions/{graph['question_id']}/retrieved-chunks",
+        json={
+            "source_document_id": graph["document_id"],
+            "rank": 1,
+            "chunk_text": "Full-time employees receive 20 days of annual leave after one year.",
+            "section_reference": "Section 1.1",
+            "relevance_label": "high",
+            "retrieval_time_ms": 15,
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert chunk.status_code == 201, chunk.text
+
+    answer = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/questions/{graph['question_id']}/generated-answers",
+        json={
+            "answer_text": "Full-time employees receive 20 days of annual leave after one year. [1]",
+            "model_name": "gemini-test",
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "generation_time_ms": 900,
+            "estimated_cost": "0.000000",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert answer.status_code == 201, answer.text
+    answer_id = answer.json()["id"]
+
+    auto_eval = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/auto-evaluate",
+        headers=auth_headers(admin_token),
+    )
+    assert auto_eval.status_code == 200, auto_eval.text
+
+    human_eval = client.post(
+        (
+            f"/projects/{graph['project_id']}/runs/{graph['run_id']}"
+            f"/questions/{graph['question_id']}/answers/{answer_id}/evaluations"
+        ),
+        json={
+            "citation_quality_score": 4,
+            "latency_cost_score": 4,
+            "evidence_faithfulness_score": 5,
+            "answer_relevance_score": 5,
+            "retrieval_quality_score": 3,
+            "reviewer_notes": "Human evaluator saw slightly weaker citation and retrieval quality.",
+            "suggested_improvement": "Use the exact section reference in the answer.",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert human_eval.status_code == 201, human_eval.text
+    assert human_eval.json()["overall_score"] == "4.20"
+
+    calibration = client.get(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/judge-calibration",
+        headers=auth_headers(viewer_token),
+    )
+    assert calibration.status_code == 200, calibration.text
+    payload = calibration.json()
+    assert payload["paired_answer_count"] == 1
+    assert payload["automated_only_count"] == 0
+    assert payload["human_only_count"] == 0
+    assert payload["overall_exact_agreement_percent"] == "60.00"
+    assert payload["overall_within_one_agreement_percent"] == "100.00"
+    assert payload["average_overall_delta"] == "-0.40"
+
+    retrieval_dimension = next(
+        dimension
+        for dimension in payload["dimension_calibration"]
+        if dimension["field"] == "retrieval_quality_score"
+    )
+    assert retrieval_dimension["average_delta"] == "-1.00"
+    assert retrieval_dimension["exact_agreement_percent"] == "0.00"
+    assert retrieval_dimension["within_one_agreement_percent"] == "100.00"
+    assert retrieval_dimension["automated_higher_count"] == 1
+    assert retrieval_dimension["bias_direction"] == "automated_over_scores"
+
+    comparison = payload["answer_comparisons"][0]
+    assert comparison["answer_id"] == answer_id
+    assert comparison["automated_overall_score"] == "4.60"
+    assert comparison["human_overall_score"] == "4.20"
+    assert comparison["dimension_deltas"]["citation_quality_score"] == "-1.00"
+    assert comparison["dimension_deltas"]["latency_cost_score"] == "0.00"
+    assert comparison["exact_matches"]["answer_relevance_score"] is True
+    assert comparison["within_one_matches"]["retrieval_quality_score"] is True
+
+
+def test_error_taxonomy_annotations_and_role_access(
+    client_and_db: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, db_factory = client_and_db
+    create_user(db_factory, "admin@example.com", "admin")
+    create_user(db_factory, "viewer@example.com", "viewer")
+    admin_token = login(client, "admin@example.com")
+    viewer_token = login(client, "viewer@example.com")
+    graph = create_setup_graph(client, admin_token, "Error Taxonomy")
+
+    answer = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/questions/{graph['question_id']}/generated-answers",
+        json={
+            "answer_text": "Employees get leave after one year.",
+            "model_name": "gemini-test",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert answer.status_code == 201, answer.text
+    answer_id = answer.json()["id"]
+
+    evaluation = client.post(
+        (
+            f"/projects/{graph['project_id']}/runs/{graph['run_id']}"
+            f"/questions/{graph['question_id']}/answers/{answer_id}/evaluations"
+        ),
+        json={
+            "citation_quality_score": 2,
+            "latency_cost_score": 4,
+            "evidence_faithfulness_score": 3,
+            "answer_relevance_score": 3,
+            "retrieval_quality_score": 2,
+            "reviewer_notes": "Answer is underspecified.",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert evaluation.status_code == 201, evaluation.text
+    evaluation_id = evaluation.json()["id"]
+
+    viewer_create = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/questions/{graph['question_id']}/answers/{answer_id}/errors",
+        json={"category": "citation_error", "severity": "high"},
+        headers=auth_headers(viewer_token),
+    )
+    assert viewer_create.status_code == 403
+
+    citation_error = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/questions/{graph['question_id']}/answers/{answer_id}/errors",
+        json={
+            "category": "citation_error",
+            "severity": "high",
+            "evaluation_record_id": evaluation_id,
+            "notes": "Answer does not cite Section 1.1.",
+            "evidence_reference": "Expected HR Leave Policy Section 1.1.",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert citation_error.status_code == 201, citation_error.text
+    citation_error_id = citation_error.json()["id"]
+    assert citation_error.json()["source"] == "human"
+
+    retrieval_error = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/questions/{graph['question_id']}/answers/{answer_id}/errors",
+        json={
+            "category": "retrieval_miss",
+            "severity": "medium",
+            "notes": "Retrieved context did not include the exact leave allowance.",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert retrieval_error.status_code == 201, retrieval_error.text
+
+    invalid_evaluation_scope = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/questions/{graph['question_id']}/answers/{answer_id}/errors",
+        json={
+            "category": "hallucination",
+            "severity": "critical",
+            "evaluation_record_id": 999999,
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert invalid_evaluation_scope.status_code == 404
+
+    taxonomy = client.get(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/error-taxonomy",
+        headers=auth_headers(viewer_token),
+    )
+    assert taxonomy.status_code == 200, taxonomy.text
+    payload = taxonomy.json()
+    assert payload["total_errors"] == 2
+    assert payload["affected_answers"] == 1
+    assert payload["items"][0]["question_text"] == "How many annual leave days does an employee receive after one year?"
+    citation_bucket = next(item for item in payload["category_counts"] if item["key"] == "citation_error")
+    assert citation_bucket["count"] == 1
+    assert citation_bucket["percent"] == "50.00"
+    high_bucket = next(item for item in payload["severity_counts"] if item["key"] == "high")
+    assert high_bucket["count"] == 1
+
+    update_error = client.patch(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/errors/{citation_error_id}",
+        json={"severity": "critical", "notes": "Critical citation failure."},
+        headers=auth_headers(admin_token),
+    )
+    assert update_error.status_code == 200, update_error.text
+    assert update_error.json()["severity"] == "critical"
+    assert update_error.json()["notes"] == "Critical citation failure."
+
+    viewer_delete = client.delete(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/errors/{citation_error_id}",
+        headers=auth_headers(viewer_token),
+    )
+    assert viewer_delete.status_code == 403
+
+    delete_error = client.delete(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/errors/{citation_error_id}",
+        headers=auth_headers(admin_token),
+    )
+    assert delete_error.status_code == 204
+
+    taxonomy_after_delete = client.get(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/error-taxonomy",
+        headers=auth_headers(viewer_token),
+    )
+    assert taxonomy_after_delete.status_code == 200
+    assert taxonomy_after_delete.json()["total_errors"] == 1
+
+
 def test_run_comparison_summarizes_experiment_deltas(
     client_and_db: tuple[TestClient, sessionmaker[Session]],
 ) -> None:
@@ -977,6 +1230,123 @@ def test_run_comparison_summarizes_experiment_deltas(
         headers=auth_headers(admin_token),
     )
     assert missing_compare.status_code == 404
+
+
+def test_experiment_leaderboard_ranks_runs_by_quality(
+    client_and_db: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, db_factory = client_and_db
+    create_user(db_factory, "admin@example.com", "admin")
+    create_user(db_factory, "viewer@example.com", "viewer")
+    admin_token = login(client, "admin@example.com")
+    viewer_token = login(client, "viewer@example.com")
+    graph = create_setup_graph(client, admin_token, "Experiment Leaderboard")
+
+    stronger_run = client.post(
+        f"/projects/{graph['project_id']}/runs",
+        json={"name": "Vector Experiment", "system_version": "v2"},
+        headers=auth_headers(admin_token),
+    )
+    assert stronger_run.status_code == 201, stronger_run.text
+    stronger_run_id = stronger_run.json()["id"]
+
+    with db_factory() as db:
+        baseline = db.get(EvaluationRun, graph["run_id"])
+        stronger = db.get(EvaluationRun, stronger_run_id)
+        assert baseline is not None
+        assert stronger is not None
+        baseline.retrieval_mode = "keyword"
+        stronger.retrieval_mode = "vector"
+        stronger.embedding_model_name = "gemini-embedding-001"
+        db.commit()
+
+    created_answers: dict[int, int] = {}
+    for run_id, answer_text, scores in [
+        (
+            graph["run_id"],
+            "Employees receive leave after one year.",
+            {
+                "citation_quality_score": 3,
+                "latency_cost_score": 3,
+                "evidence_faithfulness_score": 3,
+                "answer_relevance_score": 3,
+                "retrieval_quality_score": 3,
+            },
+        ),
+        (
+            stronger_run_id,
+            "Full-time employees receive 20 days of annual leave after one year. [1]",
+            {
+                "citation_quality_score": 5,
+                "latency_cost_score": 5,
+                "evidence_faithfulness_score": 5,
+                "answer_relevance_score": 5,
+                "retrieval_quality_score": 5,
+            },
+        ),
+    ]:
+        chunk = client.post(
+            f"/projects/{graph['project_id']}/runs/{run_id}/questions/{graph['question_id']}/retrieved-chunks",
+            json={
+                "source_document_id": graph["document_id"],
+                "rank": 1,
+                "chunk_text": "HR Leave Policy Section 1.1 confirms 20 annual leave days after one year.",
+                "section_reference": "Section 1.1",
+                "relevance_label": "high",
+            },
+            headers=auth_headers(admin_token),
+        )
+        assert chunk.status_code == 201, chunk.text
+
+        answer = client.post(
+            f"/projects/{graph['project_id']}/runs/{run_id}/questions/{graph['question_id']}/generated-answers",
+            json={"answer_text": answer_text, "model_name": "gemini-test"},
+            headers=auth_headers(admin_token),
+        )
+        assert answer.status_code == 201, answer.text
+        answer_id = answer.json()["id"]
+        created_answers[run_id] = answer_id
+
+        evaluation = client.post(
+            (
+                f"/projects/{graph['project_id']}/runs/{run_id}"
+                f"/questions/{graph['question_id']}/answers/{answer_id}/evaluations"
+            ),
+            json={**scores, "reviewer_notes": "Leaderboard score."},
+            headers=auth_headers(admin_token),
+        )
+        assert evaluation.status_code == 201, evaluation.text
+
+    error = client.post(
+        (
+            f"/projects/{graph['project_id']}/runs/{graph['run_id']}"
+            f"/questions/{graph['question_id']}/answers/{created_answers[graph['run_id']]}/errors"
+        ),
+        json={
+            "category": "incomplete_answer",
+            "severity": "high",
+            "notes": "The answer omits the 20 day allowance.",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert error.status_code == 201, error.text
+
+    leaderboard = client.get(
+        f"/projects/{graph['project_id']}/leaderboard",
+        headers=auth_headers(viewer_token),
+    )
+    assert leaderboard.status_code == 200, leaderboard.text
+    payload = leaderboard.json()
+    assert payload["total_runs"] == 2
+    assert payload["best_run_id"] == stronger_run_id
+    assert payload["runs"][0]["rank"] == 1
+    assert payload["runs"][0]["run_id"] == stronger_run_id
+    assert payload["runs"][0]["leaderboard_score"] > payload["runs"][1]["leaderboard_score"]
+    assert payload["runs"][0]["quality_gate"] == "release_candidate"
+    assert payload["runs"][0]["retrieval_hit_rate"] == "1.00"
+    assert payload["runs"][1]["error_count"] == 1
+    assert payload["runs"][1]["high_error_count"] == 1
+    assert payload["runs"][1]["quality_gate"] == "needs_error_review"
 
 
 def test_question_dataset_import_csv_json_validation_and_role_access(

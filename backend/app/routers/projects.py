@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user, require_roles
 from app.config import BACKEND_ROOT, get_settings
 from app.database import get_db
-from app.models import DocumentChunk, EvaluationRecord, EvaluationRun, Project, QuestionDataset, SourceDocument, TestQuestion, User
+from app.models import DocumentChunk, ErrorAnnotation, EvaluationRecord, EvaluationRun, Project, QuestionDataset, SourceDocument, TestQuestion, User
 from app.models import GeneratedAnswer, RetrievedChunk
 from app.schemas import (
     AutoEvaluationRunRead,
@@ -24,6 +24,11 @@ from app.schemas import (
     BatchExperimentRead,
     DocumentChunkRead,
     DocumentIndexRead,
+    ErrorAnnotationCreate,
+    ErrorAnnotationRead,
+    ErrorAnnotationUpdate,
+    ErrorTaxonomyRead,
+    ExperimentLeaderboardRead,
     EvaluationRecordCreate,
     EvaluationRecordRead,
     EvaluationRecordUpdate,
@@ -33,6 +38,7 @@ from app.schemas import (
     EvaluationRunUpdate,
     GeneratedAnswerCreate,
     GeneratedAnswerRead,
+    JudgeCalibrationRead,
     ProjectCreate,
     ProjectRead,
     ProjectUpdate,
@@ -82,6 +88,24 @@ DIMENSION_LABELS = {
     "evidence_faithfulness_score": "Evidence Faithfulness",
     "answer_relevance_score": "Answer Relevance",
     "retrieval_quality_score": "Retrieval Quality",
+}
+ERROR_CATEGORY_LABELS = {
+    "retrieval_miss": "Retrieval Miss",
+    "citation_error": "Citation Error",
+    "hallucination": "Hallucination",
+    "incomplete_answer": "Incomplete Answer",
+    "irrelevant_answer": "Irrelevant Answer",
+    "contradiction": "Contradiction",
+    "latency_cost": "Latency or Cost",
+    "format_error": "Format Error",
+    "policy_ambiguity": "Policy Ambiguity",
+    "other": "Other",
+}
+ERROR_SEVERITY_LABELS = {
+    "low": "Low",
+    "medium": "Medium",
+    "high": "High",
+    "critical": "Critical",
 }
 
 
@@ -197,6 +221,18 @@ def get_evaluation_or_404(db: Session, run_id: int, evaluation_id: int) -> Evalu
     return evaluation
 
 
+def get_error_annotation_or_404(db: Session, run_id: int, error_id: int) -> ErrorAnnotation:
+    annotation = db.scalar(
+        select(ErrorAnnotation).where(
+            ErrorAnnotation.id == error_id,
+            ErrorAnnotation.evaluation_run_id == run_id,
+        )
+    )
+    if annotation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Error annotation not found")
+    return annotation
+
+
 def validate_output_scope(
     db: Session,
     project_id: int,
@@ -210,6 +246,24 @@ def validate_output_scope(
     if source_document_id is not None:
         document = get_document_or_404(db, project_id, source_document_id)
     return run, question, document
+
+
+def validate_error_evaluation_scope(
+    db: Session,
+    run_id: int,
+    question_id: int,
+    answer_id: int,
+    evaluation_record_id: int | None,
+) -> EvaluationRecord | None:
+    if evaluation_record_id is None:
+        return None
+    evaluation = get_evaluation_or_404(db, run_id, evaluation_record_id)
+    if evaluation.test_question_id != question_id or evaluation.generated_answer_id != answer_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Evaluation record must belong to the selected question and answer.",
+        )
+    return evaluation
 
 
 def calculate_overall_score(record: object) -> Decimal:
@@ -529,6 +583,150 @@ def score_delta(left: Decimal | None, right: Decimal | None) -> Decimal | None:
     return (left - right).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+def decimal_or_zero(value: Decimal | None) -> Decimal:
+    return value if value is not None else Decimal("0.00")
+
+
+def clamp_decimal(value: Decimal, lower: Decimal, upper: Decimal) -> Decimal:
+    return max(lower, min(upper, value))
+
+
+def experiment_quality_gate(
+    generated_answers: int,
+    reviewed_answers: int,
+    average_score: Decimal | None,
+    ready_for_release: bool,
+    high_error_count: int,
+    critical_error_count: int,
+) -> str:
+    if generated_answers == 0:
+        return "no_outputs"
+    if critical_error_count > 0:
+        return "blocked_critical_errors"
+    if high_error_count > 0:
+        return "needs_error_review"
+    if reviewed_answers < generated_answers:
+        return "needs_review"
+    if ready_for_release and average_score is not None and average_score >= Decimal("4.00"):
+        return "release_candidate"
+    return "scored"
+
+
+def calculate_leaderboard_score(
+    average_score: Decimal | None,
+    review_completion_percent: Decimal,
+    retrieval_hit_rate: Decimal | None,
+    judge_within_one_agreement_percent: Decimal,
+    judge_paired_answer_count: int,
+    error_count: int,
+    high_error_count: int,
+    critical_error_count: int,
+) -> Decimal:
+    score_component = decimal_or_zero(average_score) / Decimal("5.00") * Decimal("50.00")
+    review_component = review_completion_percent / Decimal("100.00") * Decimal("15.00")
+    retrieval_component = decimal_or_zero(retrieval_hit_rate) * Decimal("15.00")
+    calibration_component = (
+        judge_within_one_agreement_percent / Decimal("100.00") * Decimal("10.00")
+        if judge_paired_answer_count > 0
+        else Decimal("0.00")
+    )
+    error_penalty = min(
+        Decimal("20.00"),
+        (Decimal(error_count) * Decimal("3.00"))
+        + (Decimal(high_error_count) * Decimal("2.00"))
+        + (Decimal(critical_error_count) * Decimal("5.00")),
+    )
+    score = score_component + review_component + retrieval_component + calibration_component - error_penalty
+    return clamp_decimal(score, Decimal("0.00"), Decimal("100.00")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def build_experiment_leaderboard(db: Session, project: Project) -> dict[str, object]:
+    runs = list(
+        db.scalars(
+            select(EvaluationRun)
+            .where(EvaluationRun.project_id == project.id)
+            .order_by(EvaluationRun.created_at.desc(), EvaluationRun.id.desc())
+        ).all()
+    )
+    rows = []
+    for run in runs:
+        summary = build_run_summary(db, project, run)
+        review_dashboard = build_run_review_dashboard(db, project, run)
+        calibration = build_judge_calibration(db, project, run)
+        taxonomy = build_error_taxonomy(db, project, run)
+        severity_counts = {item["key"]: item["count"] for item in taxonomy["severity_counts"]}
+        high_error_count = int(severity_counts.get("high", 0))
+        critical_error_count = int(severity_counts.get("critical", 0))
+        average_score = review_dashboard["approved_average_overall_score"] or summary["average_overall_score"]
+        leaderboard_score = calculate_leaderboard_score(
+            average_score=average_score,
+            review_completion_percent=summary["review_completion_percent"],
+            retrieval_hit_rate=summary["retrieval_metrics"]["hit_rate"],
+            judge_within_one_agreement_percent=calibration["overall_within_one_agreement_percent"],
+            judge_paired_answer_count=calibration["paired_answer_count"],
+            error_count=taxonomy["total_errors"],
+            high_error_count=high_error_count,
+            critical_error_count=critical_error_count,
+        )
+        rows.append(
+            {
+                "rank": 0,
+                "run_id": run.id,
+                "run_name": run.name,
+                "status": run.status,
+                "system_version": run.system_version,
+                "retrieval_mode": run.retrieval_mode,
+                "generator_model_name": run.generator_model_name,
+                "embedding_model_name": run.embedding_model_name,
+                "judge_model_name": run.judge_model_name,
+                "generated_answers": summary["generated_answers"],
+                "reviewed_answers": summary["reviewed_answers"],
+                "review_completion_percent": summary["review_completion_percent"],
+                "average_overall_score": summary["average_overall_score"],
+                "approved_average_overall_score": review_dashboard["approved_average_overall_score"],
+                "retrieval_hit_rate": summary["retrieval_metrics"]["hit_rate"],
+                "retrieval_mrr": summary["retrieval_metrics"]["mean_reciprocal_rank"],
+                "judge_exact_agreement_percent": calibration["overall_exact_agreement_percent"],
+                "judge_within_one_agreement_percent": calibration["overall_within_one_agreement_percent"],
+                "judge_paired_answer_count": calibration["paired_answer_count"],
+                "error_count": taxonomy["total_errors"],
+                "high_error_count": high_error_count,
+                "critical_error_count": critical_error_count,
+                "leaderboard_score": leaderboard_score,
+                "quality_gate": experiment_quality_gate(
+                    generated_answers=summary["generated_answers"],
+                    reviewed_answers=summary["reviewed_answers"],
+                    average_score=average_score,
+                    ready_for_release=review_dashboard["ready_for_release"],
+                    high_error_count=high_error_count,
+                    critical_error_count=critical_error_count,
+                ),
+            }
+        )
+
+    ranked_rows = sorted(
+        rows,
+        key=lambda row: (
+            row["leaderboard_score"],
+            row["approved_average_overall_score"] or row["average_overall_score"] or Decimal("0.00"),
+            row["retrieval_hit_rate"] or Decimal("0.00"),
+            -row["error_count"],
+            row["run_id"],
+        ),
+        reverse=True,
+    )
+    for index, row in enumerate(ranked_rows, start=1):
+        row["rank"] = index
+
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        "total_runs": len(ranked_rows),
+        "best_run_id": ranked_rows[0]["run_id"] if ranked_rows else None,
+        "runs": ranked_rows,
+    }
+
+
 def better_run_id(run_summaries: list[dict[str, object]], score_key: str = "average_overall_score") -> int | None:
     scored = [summary for summary in run_summaries if summary[score_key] is not None]
     if not scored:
@@ -724,6 +922,227 @@ def build_run_review_dashboard(db: Session, project: Project, run: EvaluationRun
     }
 
 
+def bias_direction_for_delta(average_delta: Decimal | None) -> str:
+    if average_delta is None or average_delta == Decimal("0.00"):
+        return "aligned"
+    if average_delta > Decimal("0.00"):
+        return "automated_under_scores"
+    return "automated_over_scores"
+
+
+def latest_human_calibration_record(records: list[EvaluationRecord]) -> EvaluationRecord | None:
+    human_records = [record for record in records if record.evaluation_mode == "human"]
+    approved_records = [record for record in human_records if record.review_status == "approved"]
+    return latest_by_id(approved_records or human_records)
+
+
+def build_judge_calibration(db: Session, project: Project, run: EvaluationRun) -> dict[str, object]:
+    questions = {
+        question.id: question
+        for question in db.scalars(select(TestQuestion).where(TestQuestion.project_id == project.id)).all()
+    }
+    answers = list(
+        db.scalars(
+            select(GeneratedAnswer)
+            .where(GeneratedAnswer.evaluation_run_id == run.id)
+            .order_by(GeneratedAnswer.created_at.asc(), GeneratedAnswer.id.asc())
+        ).all()
+    )
+    evaluations_by_answer: dict[int, list[EvaluationRecord]] = {}
+    for evaluation in db.scalars(
+        select(EvaluationRecord)
+        .where(EvaluationRecord.evaluation_run_id == run.id)
+        .order_by(EvaluationRecord.created_at.asc(), EvaluationRecord.id.asc())
+    ).all():
+        evaluations_by_answer.setdefault(evaluation.generated_answer_id, []).append(evaluation)
+
+    answer_comparisons = []
+    overall_deltas: list[Decimal] = []
+    exact_match_count = 0
+    within_one_match_count = 0
+    total_score_pairs = 0
+    dimension_deltas: dict[str, list[Decimal]] = {field: [] for field in SCORE_FIELDS}
+    dimension_exact_counts: dict[str, int] = {field: 0 for field in SCORE_FIELDS}
+    dimension_within_one_counts: dict[str, int] = {field: 0 for field in SCORE_FIELDS}
+    dimension_automated_higher_counts: dict[str, int] = {field: 0 for field in SCORE_FIELDS}
+    dimension_human_higher_counts: dict[str, int] = {field: 0 for field in SCORE_FIELDS}
+    dimension_equal_counts: dict[str, int] = {field: 0 for field in SCORE_FIELDS}
+    automated_answer_ids: set[int] = set()
+    human_answer_ids: set[int] = set()
+
+    for answer in answers:
+        records = evaluations_by_answer.get(answer.id, [])
+        automated_evaluation = latest_by_id([record for record in records if record.evaluation_mode == "automated"])
+        human_evaluation = latest_human_calibration_record(records)
+        if automated_evaluation is not None:
+            automated_answer_ids.add(answer.id)
+        if human_evaluation is not None:
+            human_answer_ids.add(answer.id)
+        if automated_evaluation is None or human_evaluation is None:
+            continue
+
+        question = questions.get(answer.test_question_id)
+        if question is None:
+            continue
+
+        per_answer_deltas = {}
+        exact_matches = {}
+        within_one_matches = {}
+        for field in SCORE_FIELDS:
+            automated_score = Decimal(getattr(automated_evaluation, field))
+            human_score = Decimal(getattr(human_evaluation, field))
+            delta = (human_score - automated_score).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            exact_match = delta == Decimal("0.00")
+            within_one_match = abs(delta) <= Decimal("1.00")
+
+            per_answer_deltas[field] = delta
+            exact_matches[field] = exact_match
+            within_one_matches[field] = within_one_match
+            dimension_deltas[field].append(delta)
+            total_score_pairs += 1
+            if exact_match:
+                exact_match_count += 1
+                dimension_exact_counts[field] += 1
+                dimension_equal_counts[field] += 1
+            elif delta > Decimal("0.00"):
+                dimension_human_higher_counts[field] += 1
+            else:
+                dimension_automated_higher_counts[field] += 1
+            if within_one_match:
+                within_one_match_count += 1
+                dimension_within_one_counts[field] += 1
+
+        overall_delta = (human_evaluation.overall_score - automated_evaluation.overall_score).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+        overall_deltas.append(overall_delta)
+        answer_comparisons.append(
+            {
+                "question_id": question.id,
+                "question_text": question.question_text,
+                "answer_id": answer.id,
+                "automated_evaluation_id": automated_evaluation.id,
+                "human_evaluation_id": human_evaluation.id,
+                "automated_overall_score": automated_evaluation.overall_score,
+                "human_overall_score": human_evaluation.overall_score,
+                "overall_delta": overall_delta,
+                "dimension_deltas": per_answer_deltas,
+                "exact_matches": exact_matches,
+                "within_one_matches": within_one_matches,
+            }
+        )
+
+    dimension_calibration = []
+    for field in SCORE_FIELDS:
+        score_pair_count = len(dimension_deltas[field])
+        average_delta = decimal_average(dimension_deltas[field])
+        dimension_calibration.append(
+            {
+                "field": field,
+                "label": DIMENSION_LABELS[field],
+                "paired_score_count": score_pair_count,
+                "average_delta": average_delta,
+                "exact_agreement_percent": percent(dimension_exact_counts[field], score_pair_count),
+                "within_one_agreement_percent": percent(dimension_within_one_counts[field], score_pair_count),
+                "automated_higher_count": dimension_automated_higher_counts[field],
+                "human_higher_count": dimension_human_higher_counts[field],
+                "equal_count": dimension_equal_counts[field],
+                "bias_direction": bias_direction_for_delta(average_delta),
+            }
+        )
+
+    return {
+        "project_id": project.id,
+        "run_id": run.id,
+        "run_name": run.name,
+        "paired_answer_count": len(answer_comparisons),
+        "automated_only_count": len(automated_answer_ids - human_answer_ids),
+        "human_only_count": len(human_answer_ids - automated_answer_ids),
+        "overall_exact_agreement_percent": percent(exact_match_count, total_score_pairs),
+        "overall_within_one_agreement_percent": percent(within_one_match_count, total_score_pairs),
+        "average_overall_delta": decimal_average(overall_deltas),
+        "dimension_calibration": dimension_calibration,
+        "answer_comparisons": sorted(answer_comparisons, key=lambda item: item["question_id"]),
+    }
+
+
+def build_count_buckets(counts: dict[str, int], labels: dict[str, str], total: int) -> list[dict[str, object]]:
+    return [
+        {
+            "key": key,
+            "label": labels[key],
+            "count": count,
+            "percent": percent(count, total),
+        }
+        for key, count in counts.items()
+    ]
+
+
+def build_error_taxonomy(db: Session, project: Project, run: EvaluationRun) -> dict[str, object]:
+    questions = {
+        question.id: question
+        for question in db.scalars(select(TestQuestion).where(TestQuestion.project_id == project.id)).all()
+    }
+    answers = {
+        answer.id: answer
+        for answer in db.scalars(
+            select(GeneratedAnswer)
+            .where(GeneratedAnswer.evaluation_run_id == run.id)
+            .order_by(GeneratedAnswer.created_at.asc(), GeneratedAnswer.id.asc())
+        ).all()
+    }
+    annotations = list(
+        db.scalars(
+            select(ErrorAnnotation)
+            .where(ErrorAnnotation.evaluation_run_id == run.id)
+            .order_by(ErrorAnnotation.created_at.desc(), ErrorAnnotation.id.desc())
+        ).all()
+    )
+    category_counts = {key: 0 for key in ERROR_CATEGORY_LABELS}
+    severity_counts = {key: 0 for key in ERROR_SEVERITY_LABELS}
+    items = []
+    affected_answer_ids: set[int] = set()
+    for annotation in annotations:
+        question = questions.get(annotation.test_question_id)
+        answer = answers.get(annotation.generated_answer_id)
+        if question is None or answer is None:
+            continue
+        category_counts[annotation.category] += 1
+        severity_counts[annotation.severity] += 1
+        affected_answer_ids.add(annotation.generated_answer_id)
+        items.append(
+            {
+                "id": annotation.id,
+                "question_id": question.id,
+                "question_text": question.question_text,
+                "answer_id": answer.id,
+                "answer_text": answer.answer_text,
+                "evaluation_record_id": annotation.evaluation_record_id,
+                "category": annotation.category,
+                "category_label": ERROR_CATEGORY_LABELS[annotation.category],
+                "severity": annotation.severity,
+                "source": annotation.source,
+                "notes": annotation.notes,
+                "evidence_reference": annotation.evidence_reference,
+                "created_by_user_id": annotation.created_by_user_id,
+                "created_at": annotation.created_at,
+            }
+        )
+
+    total_errors = len(items)
+    return {
+        "project_id": project.id,
+        "run_id": run.id,
+        "run_name": run.name,
+        "total_errors": total_errors,
+        "affected_answers": len(affected_answer_ids),
+        "category_counts": build_count_buckets(category_counts, ERROR_CATEGORY_LABELS, total_errors),
+        "severity_counts": build_count_buckets(severity_counts, ERROR_SEVERITY_LABELS, total_errors),
+        "items": items,
+    }
+
+
 def apply_updates(instance: object, payload: object) -> None:
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(instance, key, value)
@@ -880,6 +1299,16 @@ def read_project_summary(
 ) -> dict[str, object]:
     project = get_project_or_404(db, project_id)
     return build_project_summary(db, project)
+
+
+@router.get("/{project_id}/leaderboard", response_model=ExperimentLeaderboardRead)
+def read_experiment_leaderboard(
+    project_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> dict[str, object]:
+    project = get_project_or_404(db, project_id)
+    return build_experiment_leaderboard(db, project)
 
 
 @router.patch("/{project_id}", response_model=ProjectRead)
@@ -1470,6 +1899,48 @@ def read_run_review_dashboard(
     return build_run_review_dashboard(db, project, run)
 
 
+@router.get("/{project_id}/runs/{run_id}/judge-calibration", response_model=JudgeCalibrationRead)
+def read_run_judge_calibration(
+    project_id: int,
+    run_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> dict[str, object]:
+    project = get_project_or_404(db, project_id)
+    run = get_run_or_404(db, project_id, run_id)
+    return build_judge_calibration(db, project, run)
+
+
+@router.get("/{project_id}/runs/{run_id}/error-taxonomy", response_model=ErrorTaxonomyRead)
+def read_run_error_taxonomy(
+    project_id: int,
+    run_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> dict[str, object]:
+    project = get_project_or_404(db, project_id)
+    run = get_run_or_404(db, project_id, run_id)
+    return build_error_taxonomy(db, project, run)
+
+
+@router.get("/{project_id}/runs/{run_id}/errors", response_model=list[ErrorAnnotationRead])
+def list_error_annotations(
+    project_id: int,
+    run_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> list[ErrorAnnotation]:
+    get_project_or_404(db, project_id)
+    get_run_or_404(db, project_id, run_id)
+    return list(
+        db.scalars(
+            select(ErrorAnnotation)
+            .where(ErrorAnnotation.evaluation_run_id == run_id)
+            .order_by(ErrorAnnotation.created_at.desc(), ErrorAnnotation.id.desc())
+        ).all()
+    )
+
+
 @router.get("/{project_id}/runs/{run_id}/export.json")
 def export_run_json(
     project_id: int,
@@ -1885,6 +2356,41 @@ def create_evaluation_record(
     return evaluation
 
 
+@router.post(
+    "/{project_id}/runs/{run_id}/questions/{question_id}/answers/{answer_id}/errors",
+    response_model=ErrorAnnotationRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_error_annotation(
+    project_id: int,
+    run_id: int,
+    question_id: int,
+    answer_id: int,
+    payload: ErrorAnnotationCreate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: WritableUser,
+) -> ErrorAnnotation:
+    validate_output_scope(db, project_id, run_id, question_id)
+    get_answer_or_404(db, run_id, question_id, answer_id)
+    validate_error_evaluation_scope(db, run_id, question_id, answer_id, payload.evaluation_record_id)
+    annotation = ErrorAnnotation(
+        evaluation_run_id=run_id,
+        test_question_id=question_id,
+        generated_answer_id=answer_id,
+        evaluation_record_id=payload.evaluation_record_id,
+        created_by_user_id=current_user.id,
+        category=payload.category,
+        severity=payload.severity,
+        source="human",
+        notes=payload.notes,
+        evidence_reference=payload.evidence_reference,
+    )
+    db.add(annotation)
+    db.commit()
+    db.refresh(annotation)
+    return annotation
+
+
 @router.get(
     "/{project_id}/runs/{run_id}/evaluations",
     response_model=list[EvaluationRecordRead],
@@ -1926,6 +2432,27 @@ def update_evaluation_record(
     db.commit()
     db.refresh(evaluation)
     return evaluation
+
+
+@router.patch(
+    "/{project_id}/runs/{run_id}/errors/{error_id}",
+    response_model=ErrorAnnotationRead,
+)
+def update_error_annotation(
+    project_id: int,
+    run_id: int,
+    error_id: int,
+    payload: ErrorAnnotationUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    _: WritableUser,
+) -> ErrorAnnotation:
+    get_project_or_404(db, project_id)
+    get_run_or_404(db, project_id, run_id)
+    annotation = get_error_annotation_or_404(db, run_id, error_id)
+    apply_updates(annotation, payload)
+    db.commit()
+    db.refresh(annotation)
+    return annotation
 
 
 @router.patch(
@@ -1998,5 +2525,24 @@ def delete_evaluation_record(
     get_run_or_404(db, project_id, run_id)
     evaluation = get_evaluation_or_404(db, run_id, evaluation_id)
     db.delete(evaluation)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete(
+    "/{project_id}/runs/{run_id}/errors/{error_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_error_annotation(
+    project_id: int,
+    run_id: int,
+    error_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: WritableUser,
+) -> Response:
+    get_project_or_404(db, project_id)
+    get_run_or_404(db, project_id, run_id)
+    annotation = get_error_annotation_or_404(db, run_id, error_id)
+    db.delete(annotation)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

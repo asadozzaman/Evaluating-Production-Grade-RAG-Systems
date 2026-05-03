@@ -8,7 +8,12 @@ import {
   AutoEvaluationResult,
   EvaluationRun,
   EvaluationRecord,
+  ErrorAnnotation,
+  ErrorCategory,
+  ErrorSeverity,
+  ErrorTaxonomyReport,
   GeneratedAnswer,
+  JudgeCalibrationReport,
   Project,
   RagExecutionResult,
   RetrievedChunk,
@@ -22,6 +27,24 @@ import {
 
 const relevanceLabels = ["high", "medium", "low", "irrelevant"];
 const scoreOptions = [1, 2, 3, 4, 5];
+const errorCategories: Array<{ value: ErrorCategory; label: string }> = [
+  { value: "retrieval_miss", label: "Retrieval Miss" },
+  { value: "citation_error", label: "Citation Error" },
+  { value: "hallucination", label: "Hallucination" },
+  { value: "incomplete_answer", label: "Incomplete Answer" },
+  { value: "irrelevant_answer", label: "Irrelevant Answer" },
+  { value: "contradiction", label: "Contradiction" },
+  { value: "latency_cost", label: "Latency or Cost" },
+  { value: "format_error", label: "Format Error" },
+  { value: "policy_ambiguity", label: "Policy Ambiguity" },
+  { value: "other", label: "Other" },
+];
+const errorSeverities: Array<{ value: ErrorSeverity; label: string }> = [
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "critical", label: "Critical" },
+];
 const retrievalModes = [
   { value: "keyword", label: "Keyword matching" },
   { value: "vector", label: "Vector embeddings" },
@@ -49,6 +72,8 @@ export default function RunOutputPage() {
   const [evaluations, setEvaluations] = useState<EvaluationRecord[]>([]);
   const [summary, setSummary] = useState<RunSummary | null>(null);
   const [reviewDashboard, setReviewDashboard] = useState<RunReviewDashboard | null>(null);
+  const [judgeCalibration, setJudgeCalibration] = useState<JudgeCalibrationReport | null>(null);
+  const [errorTaxonomy, setErrorTaxonomy] = useState<ErrorTaxonomyReport | null>(null);
   const [executionResult, setExecutionResult] = useState<RagExecutionResult | null>(null);
   const [autoEvaluationResult, setAutoEvaluationResult] = useState<AutoEvaluationResult | null>(null);
   const [retrievalMode, setRetrievalMode] = useState<"keyword" | "vector">("keyword");
@@ -108,7 +133,7 @@ export default function RunOutputPage() {
     if (!token) {
       return;
     }
-    const [summaryData, reviewDashboardData] = await Promise.all([
+    const [summaryData, reviewDashboardData, judgeCalibrationData, errorTaxonomyData] = await Promise.all([
       authRequest<RunSummary>(
         `/projects/${projectId}/runs/${runId}/summary`,
         { method: "GET" },
@@ -119,9 +144,21 @@ export default function RunOutputPage() {
         { method: "GET" },
         token,
       ),
+      authRequest<JudgeCalibrationReport>(
+        `/projects/${projectId}/runs/${runId}/judge-calibration`,
+        { method: "GET" },
+        token,
+      ),
+      authRequest<ErrorTaxonomyReport>(
+        `/projects/${projectId}/runs/${runId}/error-taxonomy`,
+        { method: "GET" },
+        token,
+      ),
     ]);
     setSummary(summaryData);
     setReviewDashboard(reviewDashboardData);
+    setJudgeCalibration(judgeCalibrationData);
+    setErrorTaxonomy(errorTaxonomyData);
   }, [getToken, projectId, runId]);
 
   const loadPage = useCallback(async () => {
@@ -131,13 +168,15 @@ export default function RunOutputPage() {
     }
 
     try {
-      const [projectData, runData, documentData, questionData, summaryData, reviewDashboardData] = await Promise.all([
+      const [projectData, runData, documentData, questionData, summaryData, reviewDashboardData, judgeCalibrationData, errorTaxonomyData] = await Promise.all([
         authRequest<Project>(`/projects/${projectId}`, { method: "GET" }, token),
         authRequest<EvaluationRun>(`/projects/${projectId}/runs/${runId}`, { method: "GET" }, token),
         authRequest<SourceDocument[]>(`/projects/${projectId}/documents`, { method: "GET" }, token),
         authRequest<TestQuestion[]>(`/projects/${projectId}/questions`, { method: "GET" }, token),
         authRequest<RunSummary>(`/projects/${projectId}/runs/${runId}/summary`, { method: "GET" }, token),
         authRequest<RunReviewDashboard>(`/projects/${projectId}/runs/${runId}/review-dashboard`, { method: "GET" }, token),
+        authRequest<JudgeCalibrationReport>(`/projects/${projectId}/runs/${runId}/judge-calibration`, { method: "GET" }, token),
+        authRequest<ErrorTaxonomyReport>(`/projects/${projectId}/runs/${runId}/error-taxonomy`, { method: "GET" }, token),
       ]);
       setProject(projectData);
       setRun(runData);
@@ -145,6 +184,8 @@ export default function RunOutputPage() {
       setQuestions(questionData);
       setSummary(summaryData);
       setReviewDashboard(reviewDashboardData);
+      setJudgeCalibration(judgeCalibrationData);
+      setErrorTaxonomy(errorTaxonomyData);
       const firstQuestionId = questionData[0] ? String(questionData[0].id) : "";
       setSelectedQuestionId((current) => current || firstQuestionId);
       if (firstQuestionId) {
@@ -334,6 +375,38 @@ export default function RunOutputPage() {
     }
   }
 
+  async function submitErrorAnnotation(answerId: number, event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    const token = getToken();
+    if (!token || !selectedQuestionId) {
+      return;
+    }
+
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    try {
+      await authRequest<ErrorAnnotation>(
+        `/projects/${projectId}/runs/${runId}/questions/${selectedQuestionId}/answers/${answerId}/errors`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            category: String(formData.get("category") ?? "other"),
+            severity: String(formData.get("severity") ?? "medium"),
+            evaluation_record_id: optionalNumber(formData.get("evaluationRecordId")),
+            notes: optionalString(formData.get("notes")),
+            evidence_reference: optionalString(formData.get("evidenceReference")),
+          }),
+        },
+        token,
+      );
+      form.reset();
+      await loadSummary();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to save error annotation");
+    }
+  }
+
   async function submitReview(evaluationId: number, event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
@@ -489,6 +562,8 @@ export default function RunOutputPage() {
         {reviewDashboard ? (
           <ReviewDashboard dashboard={reviewDashboard} onSubmitReview={submitReview} />
         ) : null}
+        {judgeCalibration ? <JudgeCalibrationPanel report={judgeCalibration} /> : null}
+        {errorTaxonomy ? <ErrorTaxonomyPanel report={errorTaxonomy} /> : null}
 
         <div className="status run-selector">
           <label>
@@ -574,7 +649,9 @@ export default function RunOutputPage() {
             <EvaluationReviewList
               answers={answers}
               evaluations={evaluations}
+              errorItems={errorTaxonomy?.items ?? []}
               onSubmit={submitEvaluation}
+              onSubmitError={submitErrorAnnotation}
             />
           </SetupSection>
         </div>
@@ -765,6 +842,123 @@ function ReviewDashboard({
   );
 }
 
+function JudgeCalibrationPanel({
+  report,
+}: Readonly<{
+  report: JudgeCalibrationReport;
+}>) {
+  return (
+    <section className="status analytics-panel">
+      <div className="section-heading">
+        <h2>Judge Calibration</h2>
+        <span>{report.paired_answer_count > 0 ? "Paired" : "Needs human scores"}</span>
+      </div>
+      <div className="metric-grid">
+        <MetricCard label="Paired Answers" value={report.paired_answer_count} />
+        <MetricCard label="Exact Agreement" value={`${report.overall_exact_agreement_percent}%`} />
+        <MetricCard label="Within 1 Point" value={`${report.overall_within_one_agreement_percent}%`} />
+        <MetricCard label="Average Delta" value={formatSignedMetric(report.average_overall_delta)} />
+        <MetricCard label="Automated Only" value={report.automated_only_count} />
+        <MetricCard label="Human Only" value={report.human_only_count} />
+      </div>
+      <div className="dimension-list">
+        <h3>Dimension Agreement</h3>
+        {report.dimension_calibration.map((dimension) => (
+          <div className="dimension-row" key={dimension.field}>
+            <div className="status-row">
+              <span>{dimension.label}</span>
+              <span>{formatBiasDirection(dimension.bias_direction)}</span>
+            </div>
+            <span>
+              Delta {formatSignedMetric(dimension.average_delta)} / exact {dimension.exact_agreement_percent}% / within 1{" "}
+              {dimension.within_one_agreement_percent}%
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="question-results">
+        <h3>Paired Answer Comparisons</h3>
+        {report.answer_comparisons.length === 0 ? (
+          <p className="muted">Add a human CLEAR-RAG score to an answer that already has an automated judge score.</p>
+        ) : (
+          report.answer_comparisons.map((comparison) => (
+            <div className="mini-list-item" key={comparison.answer_id}>
+              <strong>{comparison.question_text}</strong>
+              <span>
+                Automated {comparison.automated_overall_score} / human {comparison.human_overall_score} / delta{" "}
+                {formatSignedMetric(comparison.overall_delta)}
+              </span>
+              <span>
+                {dimensionLabels
+                  .map(([key, label]) => `${label}: ${formatSignedMetric(comparison.dimension_deltas[key])}`)
+                  .join(" / ")}
+              </span>
+            </div>
+          ))
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ErrorTaxonomyPanel({
+  report,
+}: Readonly<{
+  report: ErrorTaxonomyReport;
+}>) {
+  const activeCategoryCounts = report.category_counts.filter((item) => item.count > 0);
+  const activeSeverityCounts = report.severity_counts.filter((item) => item.count > 0);
+
+  return (
+    <section className="status analytics-panel">
+      <div className="section-heading">
+        <h2>Error Taxonomy</h2>
+        <span>{report.total_errors > 0 ? "Classified" : "No errors tagged"}</span>
+      </div>
+      <div className="metric-grid">
+        <MetricCard label="Total Errors" value={report.total_errors} />
+        <MetricCard label="Affected Answers" value={report.affected_answers} />
+        <MetricCard label="Top Category" value={activeCategoryCounts[0]?.label ?? "None"} />
+        <MetricCard label="Highest Severity" value={highestSeverityLabel(activeSeverityCounts)} />
+      </div>
+      <div className="dimension-list">
+        <h3>Category Counts</h3>
+        {activeCategoryCounts.length === 0 ? (
+          <p className="muted">Use the error tagging form under CLEAR-RAG Scoring to classify observed failures.</p>
+        ) : (
+          activeCategoryCounts.map((item) => (
+            <div className="dimension-row" key={item.key}>
+              <div className="status-row">
+                <span>{item.label}</span>
+                <span>
+                  {item.count} / {item.percent}%
+                </span>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+      <div className="question-results">
+        <h3>Recent Error Tags</h3>
+        {report.items.length === 0 ? (
+          <p className="muted">No error annotations have been added for this run.</p>
+        ) : (
+          report.items.slice(0, 6).map((item) => (
+            <div className="mini-list-item" key={item.id}>
+              <strong>{item.category_label}</strong>
+              <span>
+                {formatSeverity(item.severity)} / {item.question_text}
+              </span>
+              {item.notes ? <p>{item.notes}</p> : null}
+              {item.evidence_reference ? <span>{item.evidence_reference}</span> : null}
+            </div>
+          ))
+        )}
+      </div>
+    </section>
+  );
+}
+
 function MetricCard({ label, value }: Readonly<{ label: string; value: string | number }>) {
   return (
     <div className="metric-card">
@@ -776,6 +970,38 @@ function MetricCard({ label, value }: Readonly<{ label: string; value: string | 
 
 function formatMetric(value: string | null): string {
   return value ?? "n/a";
+}
+
+function formatSignedMetric(value: string | null): string {
+  if (value === null) {
+    return "n/a";
+  }
+  const numericValue = Number(value);
+  if (Number.isNaN(numericValue) || numericValue === 0) {
+    return value;
+  }
+  return numericValue > 0 ? `+${value}` : value;
+}
+
+function formatBiasDirection(value: string): string {
+  if (value === "automated_under_scores") {
+    return "Automated under-scores";
+  }
+  if (value === "automated_over_scores") {
+    return "Automated over-scores";
+  }
+  return "Aligned";
+}
+
+function formatSeverity(value: ErrorSeverity): string {
+  return errorSeverities.find((item) => item.value === value)?.label ?? value;
+}
+
+function highestSeverityLabel(items: Array<{ key: string; label: string; count: number }>): string {
+  const severityOrder = ["critical", "high", "medium", "low"];
+  return severityOrder
+    .map((severity) => items.find((item) => item.key === severity && item.count > 0))
+    .find(Boolean)?.label ?? "None";
 }
 
 function formatExpectedSourceMatch(value: boolean | null): string {
@@ -827,11 +1053,15 @@ function SetupSection({
 function EvaluationReviewList({
   answers,
   evaluations,
+  errorItems,
   onSubmit,
+  onSubmitError,
 }: Readonly<{
   answers: GeneratedAnswer[];
   evaluations: EvaluationRecord[];
+  errorItems: ErrorTaxonomyReport["items"];
   onSubmit: (answerId: number, event: FormEvent<HTMLFormElement>) => void;
+  onSubmitError: (answerId: number, event: FormEvent<HTMLFormElement>) => void;
 }>) {
   if (answers.length === 0) {
     return null;
@@ -842,6 +1072,8 @@ function EvaluationReviewList({
       <h3>CLEAR-RAG Scoring</h3>
       {answers.map((answer) => {
         const answerEvaluations = evaluations.filter((evaluation) => evaluation.generated_answer_id === answer.id);
+        const answerErrors = errorItems.filter((item) => item.answer_id === answer.id);
+        const latestEvaluation = answerEvaluations[0];
         return (
           <div className="review-card" key={answer.id}>
             <strong>{answer.model_name ?? "Generated answer"}</strong>
@@ -876,6 +1108,35 @@ function EvaluationReviewList({
               <textarea name="reviewerNotes" placeholder="Reviewer notes" rows={3} />
               <textarea name="suggestedImprovement" placeholder="Suggested improvement" rows={3} />
               <button type="submit">Save CLEAR-RAG score</button>
+            </form>
+            <div className="mini-list">
+              {answerErrors.map((item) => (
+                <div className="mini-list-item" key={item.id}>
+                  <strong>{item.category_label}</strong>
+                  <span>{formatSeverity(item.severity)}</span>
+                  {item.notes ? <p>{item.notes}</p> : null}
+                </div>
+              ))}
+            </div>
+            <form className="compact-form" onSubmit={(event) => onSubmitError(answer.id, event)}>
+              <select name="category" defaultValue="retrieval_miss" required>
+                {errorCategories.map((category) => (
+                  <option key={category.value} value={category.value}>
+                    {category.label}
+                  </option>
+                ))}
+              </select>
+              <select name="severity" defaultValue="medium" required>
+                {errorSeverities.map((severity) => (
+                  <option key={severity.value} value={severity.value}>
+                    {severity.label}
+                  </option>
+                ))}
+              </select>
+              <input name="evaluationRecordId" type="hidden" value={latestEvaluation?.id ?? ""} />
+              <textarea name="notes" placeholder="Error notes" rows={3} />
+              <textarea name="evidenceReference" placeholder="Evidence reference or expected behavior" rows={2} />
+              <button type="submit">Add error tag</button>
             </form>
           </div>
         );

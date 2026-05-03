@@ -215,6 +215,112 @@ export type RunReviewDashboard = {
   items: ReviewDashboardItem[];
 };
 
+export type JudgeCalibrationDimension = {
+  field: string;
+  label: string;
+  paired_score_count: number;
+  average_delta: string | null;
+  exact_agreement_percent: string;
+  within_one_agreement_percent: string;
+  automated_higher_count: number;
+  human_higher_count: number;
+  equal_count: number;
+  bias_direction: "aligned" | "automated_under_scores" | "automated_over_scores" | string;
+};
+
+export type JudgeCalibrationAnswer = {
+  question_id: number;
+  question_text: string;
+  answer_id: number;
+  automated_evaluation_id: number;
+  human_evaluation_id: number;
+  automated_overall_score: string;
+  human_overall_score: string;
+  overall_delta: string;
+  dimension_deltas: DimensionScores;
+  exact_matches: Record<string, boolean>;
+  within_one_matches: Record<string, boolean>;
+};
+
+export type JudgeCalibrationReport = {
+  project_id: number;
+  run_id: number;
+  run_name: string;
+  paired_answer_count: number;
+  automated_only_count: number;
+  human_only_count: number;
+  overall_exact_agreement_percent: string;
+  overall_within_one_agreement_percent: string;
+  average_overall_delta: string | null;
+  dimension_calibration: JudgeCalibrationDimension[];
+  answer_comparisons: JudgeCalibrationAnswer[];
+};
+
+export type ErrorCategory =
+  | "retrieval_miss"
+  | "citation_error"
+  | "hallucination"
+  | "incomplete_answer"
+  | "irrelevant_answer"
+  | "contradiction"
+  | "latency_cost"
+  | "format_error"
+  | "policy_ambiguity"
+  | "other";
+
+export type ErrorSeverity = "low" | "medium" | "high" | "critical";
+
+export type ErrorAnnotation = {
+  id: number;
+  evaluation_run_id: number;
+  test_question_id: number;
+  generated_answer_id: number;
+  evaluation_record_id: number | null;
+  created_by_user_id: number;
+  category: ErrorCategory;
+  severity: ErrorSeverity;
+  source: "human" | "automated";
+  notes: string | null;
+  evidence_reference: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ErrorTaxonomyBucket = {
+  key: string;
+  label: string;
+  count: number;
+  percent: string;
+};
+
+export type ErrorTaxonomyItem = {
+  id: number;
+  question_id: number;
+  question_text: string;
+  answer_id: number;
+  answer_text: string;
+  evaluation_record_id: number | null;
+  category: ErrorCategory;
+  category_label: string;
+  severity: ErrorSeverity;
+  source: "human" | "automated";
+  notes: string | null;
+  evidence_reference: string | null;
+  created_by_user_id: number;
+  created_at: string;
+};
+
+export type ErrorTaxonomyReport = {
+  project_id: number;
+  run_id: number;
+  run_name: string;
+  total_errors: number;
+  affected_answers: number;
+  category_counts: ErrorTaxonomyBucket[];
+  severity_counts: ErrorTaxonomyBucket[];
+  items: ErrorTaxonomyItem[];
+};
+
 export type AutoEvaluationResult = {
   run_id: number;
   evaluated_answers: number;
@@ -370,6 +476,41 @@ export type RunComparison = {
   runs: RunComparisonRun[];
   metric_deltas: Record<string, RunComparisonDeltas>;
   question_results: RunComparisonQuestion[];
+};
+
+export type ExperimentLeaderboardRun = {
+  rank: number;
+  run_id: number;
+  run_name: string;
+  status: string;
+  system_version: string | null;
+  retrieval_mode: "keyword" | "vector" | null;
+  generator_model_name: string | null;
+  embedding_model_name: string | null;
+  judge_model_name: string | null;
+  generated_answers: number;
+  reviewed_answers: number;
+  review_completion_percent: string;
+  average_overall_score: string | null;
+  approved_average_overall_score: string | null;
+  retrieval_hit_rate: string | null;
+  retrieval_mrr: string | null;
+  judge_exact_agreement_percent: string;
+  judge_within_one_agreement_percent: string;
+  judge_paired_answer_count: number;
+  error_count: number;
+  high_error_count: number;
+  critical_error_count: number;
+  leaderboard_score: string;
+  quality_gate: string;
+};
+
+export type ExperimentLeaderboard = {
+  project_id: number;
+  project_name: string;
+  total_runs: number;
+  best_run_id: number | null;
+  runs: ExperimentLeaderboardRun[];
 };
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";

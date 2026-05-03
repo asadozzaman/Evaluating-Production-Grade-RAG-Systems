@@ -49,6 +49,20 @@ RelevanceLabel = Literal["high", "medium", "low", "irrelevant"]
 RetrievalMode = Literal["keyword", "vector"]
 EvaluationMode = Literal["human", "automated"]
 ReviewStatus = Literal["pending_review", "approved", "needs_revision"]
+ErrorCategory = Literal[
+    "retrieval_miss",
+    "citation_error",
+    "hallucination",
+    "incomplete_answer",
+    "irrelevant_answer",
+    "contradiction",
+    "latency_cost",
+    "format_error",
+    "policy_ambiguity",
+    "other",
+]
+ErrorSeverity = Literal["low", "medium", "high", "critical"]
+ErrorSource = Literal["human", "automated"]
 
 
 class ProjectCreate(BaseModel):
@@ -501,6 +515,115 @@ class RunReviewDashboardRead(BaseModel):
     items: list[ReviewDashboardItem]
 
 
+class JudgeCalibrationDimensionRead(BaseModel):
+    field: str
+    label: str
+    paired_score_count: int
+    average_delta: Decimal | None
+    exact_agreement_percent: Decimal
+    within_one_agreement_percent: Decimal
+    automated_higher_count: int
+    human_higher_count: int
+    equal_count: int
+    bias_direction: str
+
+
+class JudgeCalibrationAnswerRead(BaseModel):
+    question_id: int
+    question_text: str
+    answer_id: int
+    automated_evaluation_id: int
+    human_evaluation_id: int
+    automated_overall_score: Decimal
+    human_overall_score: Decimal
+    overall_delta: Decimal
+    dimension_deltas: DimensionScores
+    exact_matches: dict[str, bool]
+    within_one_matches: dict[str, bool]
+
+
+class JudgeCalibrationRead(BaseModel):
+    project_id: int
+    run_id: int
+    run_name: str
+    paired_answer_count: int
+    automated_only_count: int
+    human_only_count: int
+    overall_exact_agreement_percent: Decimal
+    overall_within_one_agreement_percent: Decimal
+    average_overall_delta: Decimal | None
+    dimension_calibration: list[JudgeCalibrationDimensionRead]
+    answer_comparisons: list[JudgeCalibrationAnswerRead]
+
+
+class ErrorAnnotationCreate(BaseModel):
+    category: ErrorCategory
+    severity: ErrorSeverity = "medium"
+    evaluation_record_id: int | None = None
+    notes: str | None = None
+    evidence_reference: str | None = None
+
+
+class ErrorAnnotationUpdate(BaseModel):
+    category: ErrorCategory | None = None
+    severity: ErrorSeverity | None = None
+    notes: str | None = None
+    evidence_reference: str | None = None
+
+
+class ErrorAnnotationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    evaluation_run_id: int
+    test_question_id: int
+    generated_answer_id: int
+    evaluation_record_id: int | None
+    created_by_user_id: int
+    category: ErrorCategory
+    severity: ErrorSeverity
+    source: ErrorSource
+    notes: str | None
+    evidence_reference: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ErrorTaxonomyBucket(BaseModel):
+    key: str
+    label: str
+    count: int
+    percent: Decimal
+
+
+class ErrorTaxonomyItem(BaseModel):
+    id: int
+    question_id: int
+    question_text: str
+    answer_id: int
+    answer_text: str
+    evaluation_record_id: int | None
+    category: ErrorCategory
+    category_label: str
+    severity: ErrorSeverity
+    source: ErrorSource
+    notes: str | None
+    evidence_reference: str | None
+    created_by_user_id: int
+    created_at: datetime
+
+
+class ErrorTaxonomyRead(BaseModel):
+    project_id: int
+    run_id: int
+    run_name: str
+    total_errors: int
+    affected_answers: int
+    category_counts: list[ErrorTaxonomyBucket]
+    severity_counts: list[ErrorTaxonomyBucket]
+    items: list[ErrorTaxonomyItem]
+
+
 class BatchExperimentRead(BaseModel):
     run: EvaluationRunRead
     rag_execution: RagExecutionRead
@@ -525,6 +648,41 @@ class ProjectSummaryRead(BaseModel):
     best_run: ProjectRunSummaryRead | None
     weakest_run: ProjectRunSummaryRead | None
     runs: list[ProjectRunSummaryRead]
+
+
+class ExperimentLeaderboardRunRead(BaseModel):
+    rank: int
+    run_id: int
+    run_name: str
+    status: str
+    system_version: str | None
+    retrieval_mode: RetrievalMode | None
+    generator_model_name: str | None
+    embedding_model_name: str | None
+    judge_model_name: str | None
+    generated_answers: int
+    reviewed_answers: int
+    review_completion_percent: Decimal
+    average_overall_score: Decimal | None
+    approved_average_overall_score: Decimal | None
+    retrieval_hit_rate: Decimal | None
+    retrieval_mrr: Decimal | None
+    judge_exact_agreement_percent: Decimal
+    judge_within_one_agreement_percent: Decimal
+    judge_paired_answer_count: int
+    error_count: int
+    high_error_count: int
+    critical_error_count: int
+    leaderboard_score: Decimal
+    quality_gate: str
+
+
+class ExperimentLeaderboardRead(BaseModel):
+    project_id: int
+    project_name: str
+    total_runs: int
+    best_run_id: int | None
+    runs: list[ExperimentLeaderboardRunRead]
 
 
 class RunComparisonRunRead(BaseModel):

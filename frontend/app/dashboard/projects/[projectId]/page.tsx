@@ -8,6 +8,7 @@ import {
   BatchExperimentResult,
   DocumentIndexResult,
   EvaluationRun,
+  ExperimentLeaderboard,
   Project,
   QuestionDataset,
   QuestionImportResult,
@@ -42,6 +43,7 @@ export default function ProjectDetailPage() {
   const [indexingDocumentId, setIndexingDocumentId] = useState<number | null>(null);
   const [selectedRunIds, setSelectedRunIds] = useState<number[]>([]);
   const [comparison, setComparison] = useState<RunComparison | null>(null);
+  const [leaderboard, setLeaderboard] = useState<ExperimentLeaderboard | null>(null);
   const [isComparing, setIsComparing] = useState(false);
   const [isImportingQuestions, setIsImportingQuestions] = useState(false);
   const [batchRunName, setBatchRunName] = useState("Batch Gemini Evaluation");
@@ -69,18 +71,20 @@ export default function ProjectDetailPage() {
     }
 
     try {
-      const [projectData, documentData, questionData, datasetData, runData] = await Promise.all([
+      const [projectData, documentData, questionData, datasetData, runData, leaderboardData] = await Promise.all([
         authRequest<Project>(`/projects/${projectId}`, { method: "GET" }, token),
         authRequest<SourceDocument[]>(`/projects/${projectId}/documents`, { method: "GET" }, token),
         authRequest<TestQuestion[]>(`/projects/${projectId}/questions`, { method: "GET" }, token),
         authRequest<QuestionDataset[]>(`/projects/${projectId}/question-datasets`, { method: "GET" }, token),
         authRequest<EvaluationRun[]>(`/projects/${projectId}/runs`, { method: "GET" }, token),
+        authRequest<ExperimentLeaderboard>(`/projects/${projectId}/leaderboard`, { method: "GET" }, token),
       ]);
       setProject(projectData);
       setDocuments(documentData);
       setQuestions(questionData);
       setQuestionDatasets(datasetData);
       setRuns(runData);
+      setLeaderboard(leaderboardData);
       setSelectedRunIds((current) => {
         if (current.length > 0) {
           return current.filter((runId) => runData.some((run) => run.id === runId));
@@ -629,6 +633,8 @@ export default function ProjectDetailPage() {
           ) : null}
         </section>
 
+        {leaderboard ? <ExperimentLeaderboardView leaderboard={leaderboard} projectId={projectId} /> : null}
+
         <section className="status comparison-panel">
           <div className="section-heading">
             <h2>Run Comparison</h2>
@@ -736,6 +742,61 @@ function RunComparisonView({ comparison }: Readonly<{ comparison: RunComparison 
   );
 }
 
+function ExperimentLeaderboardView({
+  leaderboard,
+  projectId,
+}: Readonly<{
+  leaderboard: ExperimentLeaderboard;
+  projectId: string;
+}>) {
+  const bestRun = leaderboard.runs[0];
+
+  return (
+    <section className="status comparison-panel">
+      <div className="section-heading">
+        <h2>Experiment Leaderboard</h2>
+        <span>{leaderboard.total_runs}</span>
+      </div>
+      <div className="metric-grid">
+        <MetricCard label="Best Run" value={bestRun ? `#${bestRun.rank} Run ${bestRun.run_id}` : "None"} />
+        <MetricCard label="Leaderboard Score" value={bestRun?.leaderboard_score ?? "n/a"} />
+        <MetricCard label="Approved Average" value={bestRun?.approved_average_overall_score ?? bestRun?.average_overall_score ?? "n/a"} />
+        <MetricCard label="Quality Gate" value={bestRun ? formatQualityGate(bestRun.quality_gate) : "n/a"} />
+      </div>
+      <div className="question-results">
+        {leaderboard.runs.length === 0 ? (
+          <p className="muted">Create and score runs to populate the leaderboard.</p>
+        ) : (
+          leaderboard.runs.map((run) => (
+            <div className="mini-list-item" key={run.run_id}>
+              <div className="status-row">
+                <strong>
+                  #{run.rank} {run.run_name}
+                </strong>
+                <span>{run.leaderboard_score}</span>
+              </div>
+              <span>
+                Score {run.approved_average_overall_score ?? run.average_overall_score ?? "not scored"} / Review{" "}
+                {run.review_completion_percent}% / Retrieval hit {run.retrieval_hit_rate ?? "n/a"}
+              </span>
+              <span>
+                Judge agreement {run.judge_within_one_agreement_percent}% ({run.judge_paired_answer_count} pairs) / Errors{" "}
+                {run.error_count} / Gate {formatQualityGate(run.quality_gate)}
+              </span>
+              <span>
+                {[run.retrieval_mode, run.generator_model_name, run.embedding_model_name, run.judge_model_name]
+                  .filter(Boolean)
+                  .join(" / ") || "No experiment metadata"}
+              </span>
+              <Link href={`/dashboard/projects/${projectId}/runs/${run.run_id}`}>Open run</Link>
+            </div>
+          ))
+        )}
+      </div>
+    </section>
+  );
+}
+
 function formatDelta(value: string | null): string {
   if (value === null) {
     return "n/a";
@@ -745,6 +806,13 @@ function formatDelta(value: string | null): string {
     return `+${value}`;
   }
   return value;
+}
+
+function formatQualityGate(value: string): string {
+  return value
+    .split("_")
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
 }
 
 function MetricCard({ label, value }: Readonly<{ label: string; value: string | number }>) {
