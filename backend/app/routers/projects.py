@@ -27,6 +27,7 @@ from app.schemas import (
     EvaluationRecordCreate,
     EvaluationRecordRead,
     EvaluationRecordUpdate,
+    EvaluationReviewUpdate,
     EvaluationRunCreate,
     EvaluationRunRead,
     EvaluationRunUpdate,
@@ -40,7 +41,9 @@ from app.schemas import (
     QuestionImportRead,
     RagExecutionRequest,
     RagExecutionRead,
+    RetrievalMetricsRead,
     RunComparisonRead,
+    RunReviewDashboardRead,
     RetrievedChunkCreate,
     RetrievedChunkRead,
     RunSummaryRead,
@@ -65,6 +68,7 @@ ALLOWED_UPLOAD_EXTENSIONS = {".pdf", ".docx", ".txt", ".csv", ".md"}
 ALLOWED_QUESTION_IMPORT_EXTENSIONS = {".csv", ".json"}
 QUESTION_TYPES = {"simple_factual", "conditional", "multi_document", "ambiguous", "edge_case"}
 QUESTION_IMPORT_REQUIRED_COLUMNS = {"question_text", "question_type"}
+RETRIEVAL_METRIC_K = 3
 SCORE_FIELDS = [
     "citation_quality_score",
     "latency_cost_score",
@@ -231,6 +235,12 @@ def percent(part: int, whole: int) -> Decimal:
     return (Decimal(part) * Decimal("100") / Decimal(whole)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+def decimal_ratio(part: int, whole: int) -> Decimal | None:
+    if whole == 0:
+        return None
+    return (Decimal(part) / Decimal(whole)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
 def latest_by_id(items: list[object]) -> object | None:
     if not items:
         return None
@@ -243,6 +253,123 @@ def set_batch_step(run: EvaluationRun, current_step: str, completed_step: str | 
         completed_steps.append(completed_step)
     run.current_step = current_step
     run.completed_steps = json.dumps(completed_steps)
+
+
+def normalize_metric_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", value.lower())).strip()
+
+
+def expected_source_matches(question: TestQuestion, chunk: RetrievedChunk, source_document: SourceDocument | None) -> bool:
+    expected_source = normalize_metric_text(question.expected_source)
+    if not expected_source:
+        return False
+    haystack = normalize_metric_text(
+        " ".join(
+            [
+                source_document.title if source_document else "",
+                source_document.source_uri if source_document and source_document.source_uri else "",
+                chunk.section_reference or "",
+                chunk.chunk_text,
+            ]
+        )
+    )
+    if expected_source in haystack:
+        return True
+    expected_terms = [term for term in expected_source.split() if len(term) > 2]
+    if not expected_terms:
+        return False
+    matched_terms = sum(1 for term in expected_terms if term in haystack)
+    return Decimal(matched_terms) / Decimal(len(expected_terms)) >= Decimal("0.60")
+
+
+def build_retrieval_metrics(
+    project: Project,
+    run: EvaluationRun,
+    questions: list[TestQuestion],
+    chunks: list[RetrievedChunk],
+    source_documents: dict[int, SourceDocument],
+) -> dict[str, object]:
+    chunks_by_question: dict[int, list[RetrievedChunk]] = {}
+    for chunk in chunks:
+        chunks_by_question.setdefault(chunk.test_question_id, []).append(chunk)
+
+    question_metrics = []
+    precision_values: list[Decimal] = []
+    recall_values: list[Decimal] = []
+    reciprocal_rank_values: list[Decimal] = []
+    questions_with_expected_source = 0
+    expected_source_hit_count = 0
+    questions_with_retrieved_chunks = 0
+    missing_evidence_count = 0
+
+    for question in questions:
+        question_chunks = sorted(chunks_by_question.get(question.id, []), key=lambda chunk: (chunk.rank, chunk.id))
+        top_chunks = question_chunks[:RETRIEVAL_METRIC_K]
+        expected_source_available = bool(normalize_metric_text(question.expected_source))
+        if expected_source_available:
+            questions_with_expected_source += 1
+        if question_chunks:
+            questions_with_retrieved_chunks += 1
+
+        relevant_chunks = [
+            chunk
+            for chunk in top_chunks
+            if expected_source_matches(question, chunk, source_documents.get(chunk.source_document_id))
+        ]
+        first_relevant_rank = relevant_chunks[0].rank if relevant_chunks else None
+        expected_source_match = None
+        precision_at_k = None
+        recall_at_k = None
+        reciprocal_rank = None
+        missing_evidence = False
+        if expected_source_available:
+            expected_source_match = first_relevant_rank is not None
+            precision_at_k = decimal_ratio(len(relevant_chunks), len(top_chunks)) if top_chunks else Decimal("0.00")
+            recall_at_k = Decimal("1.00") if expected_source_match else Decimal("0.00")
+            reciprocal_rank = (Decimal("1") / Decimal(first_relevant_rank)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if first_relevant_rank else Decimal("0.00")
+            precision_values.append(precision_at_k)
+            recall_values.append(recall_at_k)
+            reciprocal_rank_values.append(reciprocal_rank)
+            if expected_source_match:
+                expected_source_hit_count += 1
+            else:
+                missing_evidence = True
+                missing_evidence_count += 1
+
+        question_metrics.append(
+            {
+                "question_id": question.id,
+                "question_text": question.question_text,
+                "expected_source": question.expected_source,
+                "expected_source_available": expected_source_available,
+                "retrieved_chunk_count": len(question_chunks),
+                "relevant_chunk_count": len(relevant_chunks),
+                "expected_source_match": expected_source_match,
+                "first_relevant_rank": first_relevant_rank,
+                "precision_at_k": precision_at_k,
+                "recall_at_k": recall_at_k,
+                "reciprocal_rank": reciprocal_rank,
+                "missing_evidence": missing_evidence,
+            }
+        )
+
+    return {
+        "project_id": project.id,
+        "run_id": run.id,
+        "evaluated_question_count": len(questions),
+        "questions_with_expected_source": questions_with_expected_source,
+        "questions_with_retrieved_chunks": questions_with_retrieved_chunks,
+        "expected_source_hit_count": expected_source_hit_count,
+        "missing_evidence_count": missing_evidence_count,
+        "hit_rate": decimal_ratio(expected_source_hit_count, questions_with_expected_source),
+        "precision_at_k": decimal_average(precision_values),
+        "recall_at_k": decimal_average(recall_values),
+        "mean_reciprocal_rank": decimal_average(reciprocal_rank_values),
+        "chunk_coverage": decimal_ratio(questions_with_retrieved_chunks, len(questions)),
+        "question_metrics": question_metrics,
+    }
 
 
 def build_run_summary(db: Session, project: Project, run: EvaluationRun) -> dict[str, object]:
@@ -268,6 +395,21 @@ def build_run_summary(db: Session, project: Project, run: EvaluationRun) -> dict
             .order_by(EvaluationRecord.created_at.asc(), EvaluationRecord.id.asc())
         ).all()
     )
+    retrieved_chunks = list(
+        db.scalars(
+            select(RetrievedChunk)
+            .where(RetrievedChunk.evaluation_run_id == run.id)
+            .order_by(RetrievedChunk.test_question_id.asc(), RetrievedChunk.rank.asc(), RetrievedChunk.id.asc())
+        ).all()
+    )
+    source_documents = {
+        document.id: document
+        for document in db.scalars(select(SourceDocument).where(SourceDocument.project_id == project.id)).all()
+    }
+    retrieval_metrics = build_retrieval_metrics(project, run, questions, retrieved_chunks, source_documents)
+    retrieval_metrics_by_question = {
+        metric["question_id"]: metric for metric in retrieval_metrics["question_metrics"]
+    }
 
     answers_by_question: dict[int, list[GeneratedAnswer]] = {}
     for answer in answers:
@@ -295,6 +437,7 @@ def build_run_summary(db: Session, project: Project, run: EvaluationRun) -> dict
         latest_evaluation = None
         if latest_answer is not None:
             latest_evaluation = latest_by_id(evaluations_by_answer.get(latest_answer.id, []))
+        retrieval_metric = retrieval_metrics_by_question.get(question.id, {})
 
         question_results.append(
             {
@@ -311,6 +454,16 @@ def build_run_summary(db: Session, project: Project, run: EvaluationRun) -> dict
                 "retrieval_quality_score": latest_evaluation.retrieval_quality_score if latest_evaluation else None,
                 "evaluation_mode": latest_evaluation.evaluation_mode if latest_evaluation else None,
                 "judge_model_name": latest_evaluation.judge_model_name if latest_evaluation else None,
+                "review_status": latest_evaluation.review_status if latest_evaluation else None,
+                "reviewed_by_user_id": latest_evaluation.reviewed_by_user_id if latest_evaluation else None,
+                "reviewed_at": latest_evaluation.reviewed_at if latest_evaluation else None,
+                "expected_source_match": retrieval_metric.get("expected_source_match"),
+                "first_relevant_rank": retrieval_metric.get("first_relevant_rank"),
+                "retrieved_chunk_count": retrieval_metric.get("retrieved_chunk_count", 0),
+                "precision_at_k": retrieval_metric.get("precision_at_k"),
+                "recall_at_k": retrieval_metric.get("recall_at_k"),
+                "reciprocal_rank": retrieval_metric.get("reciprocal_rank"),
+                "missing_evidence": retrieval_metric.get("missing_evidence", False),
             }
         )
 
@@ -325,6 +478,7 @@ def build_run_summary(db: Session, project: Project, run: EvaluationRun) -> dict
         "average_overall_score": decimal_average([evaluation.overall_score for evaluation in evaluations]),
         "dimension_averages": dimension_averages,
         "weakest_dimension": weakest_dimension,
+        "retrieval_metrics": retrieval_metrics,
         "question_results": question_results,
     }
 
@@ -469,6 +623,104 @@ def build_run_comparison(db: Session, project: Project, runs: list[EvaluationRun
         "runs": run_results,
         "metric_deltas": metric_deltas,
         "question_results": sorted(question_results, key=lambda item: item["question_id"]),
+    }
+
+
+def build_run_review_dashboard(db: Session, project: Project, run: EvaluationRun) -> dict[str, object]:
+    questions = {
+        question.id: question
+        for question in db.scalars(select(TestQuestion).where(TestQuestion.project_id == project.id)).all()
+    }
+    answers = list(
+        db.scalars(
+            select(GeneratedAnswer)
+            .where(GeneratedAnswer.evaluation_run_id == run.id)
+            .order_by(GeneratedAnswer.created_at.asc(), GeneratedAnswer.id.asc())
+        ).all()
+    )
+    evaluations_by_answer: dict[int, list[EvaluationRecord]] = {}
+    for evaluation in db.scalars(
+        select(EvaluationRecord)
+        .where(EvaluationRecord.evaluation_run_id == run.id)
+        .order_by(EvaluationRecord.created_at.asc(), EvaluationRecord.id.asc())
+    ).all():
+        evaluations_by_answer.setdefault(evaluation.generated_answer_id, []).append(evaluation)
+
+    chunks_by_question: dict[int, list[RetrievedChunk]] = {}
+    for chunk in db.scalars(
+        select(RetrievedChunk)
+        .where(RetrievedChunk.evaluation_run_id == run.id)
+        .order_by(RetrievedChunk.test_question_id.asc(), RetrievedChunk.rank.asc(), RetrievedChunk.id.asc())
+    ).all():
+        chunks_by_question.setdefault(chunk.test_question_id, []).append(chunk)
+
+    items = []
+    approved_scores: list[Decimal] = []
+    status_counts = {"pending_review": 0, "approved": 0, "needs_revision": 0}
+    for answer in answers:
+        question = questions.get(answer.test_question_id)
+        if question is None:
+            continue
+        latest_evaluation = latest_by_id(evaluations_by_answer.get(answer.id, []))
+        review_status = latest_evaluation.review_status if latest_evaluation else "pending_review"
+        status_counts[review_status] += 1
+        if latest_evaluation and latest_evaluation.review_status == "approved":
+            approved_scores.append(latest_evaluation.overall_score)
+
+        items.append(
+            {
+                "question_id": question.id,
+                "question_text": question.question_text,
+                "question_type": question.question_type,
+                "expected_source": question.expected_source,
+                "answer_id": answer.id,
+                "answer_text": answer.answer_text,
+                "model_name": answer.model_name,
+                "evaluation_id": latest_evaluation.id if latest_evaluation else None,
+                "evaluation_mode": latest_evaluation.evaluation_mode if latest_evaluation else None,
+                "review_status": review_status,
+                "overall_score": latest_evaluation.overall_score if latest_evaluation else None,
+                "citation_quality_score": latest_evaluation.citation_quality_score if latest_evaluation else None,
+                "latency_cost_score": latest_evaluation.latency_cost_score if latest_evaluation else None,
+                "evidence_faithfulness_score": latest_evaluation.evidence_faithfulness_score if latest_evaluation else None,
+                "answer_relevance_score": latest_evaluation.answer_relevance_score if latest_evaluation else None,
+                "retrieval_quality_score": latest_evaluation.retrieval_quality_score if latest_evaluation else None,
+                "judge_model_name": latest_evaluation.judge_model_name if latest_evaluation else None,
+                "judge_reasoning": latest_evaluation.judge_reasoning if latest_evaluation else None,
+                "reviewer_notes": latest_evaluation.reviewer_notes if latest_evaluation else None,
+                "suggested_improvement": latest_evaluation.suggested_improvement if latest_evaluation else None,
+                "review_notes": latest_evaluation.review_notes if latest_evaluation else None,
+                "score_change_reason": latest_evaluation.score_change_reason if latest_evaluation else None,
+                "reviewed_by_user_id": latest_evaluation.reviewed_by_user_id if latest_evaluation else None,
+                "reviewed_at": latest_evaluation.reviewed_at if latest_evaluation else None,
+                "retrieved_chunks": [
+                    {
+                        "id": chunk.id,
+                        "rank": chunk.rank,
+                        "source_document_id": chunk.source_document_id,
+                        "section_reference": chunk.section_reference,
+                        "relevance_label": chunk.relevance_label,
+                        "chunk_text": chunk.chunk_text,
+                    }
+                    for chunk in chunks_by_question.get(question.id, [])
+                ],
+            }
+        )
+
+    total_answers = len(items)
+    approved_count = status_counts["approved"]
+    return {
+        "project_id": project.id,
+        "run_id": run.id,
+        "run_name": run.name,
+        "total_answers": total_answers,
+        "pending_review_count": status_counts["pending_review"],
+        "approved_count": approved_count,
+        "needs_revision_count": status_counts["needs_revision"],
+        "review_completion_percent": percent(approved_count, total_answers),
+        "ready_for_release": total_answers > 0 and approved_count == total_answers,
+        "approved_average_overall_score": decimal_average(approved_scores),
+        "items": items,
     }
 
 
@@ -1193,6 +1445,31 @@ def read_run_summary(
     return build_run_summary(db, project, run)
 
 
+@router.get("/{project_id}/runs/{run_id}/retrieval-metrics", response_model=RetrievalMetricsRead)
+def read_run_retrieval_metrics(
+    project_id: int,
+    run_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> dict[str, object]:
+    project = get_project_or_404(db, project_id)
+    run = get_run_or_404(db, project_id, run_id)
+    summary = build_run_summary(db, project, run)
+    return summary["retrieval_metrics"]
+
+
+@router.get("/{project_id}/runs/{run_id}/review-dashboard", response_model=RunReviewDashboardRead)
+def read_run_review_dashboard(
+    project_id: int,
+    run_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> dict[str, object]:
+    project = get_project_or_404(db, project_id)
+    run = get_run_or_404(db, project_id, run_id)
+    return build_run_review_dashboard(db, project, run)
+
+
 @router.get("/{project_id}/runs/{run_id}/export.json")
 def export_run_json(
     project_id: int,
@@ -1232,6 +1509,13 @@ def export_run_csv(
             "retrieval_quality_score",
             "evaluation_mode",
             "judge_model_name",
+            "expected_source_match",
+            "first_relevant_rank",
+            "retrieved_chunk_count",
+            "precision_at_k",
+            "recall_at_k",
+            "reciprocal_rank",
+            "missing_evidence",
         ]
     )
     for row in summary["question_results"]:
@@ -1250,6 +1534,13 @@ def export_run_csv(
                 row["retrieval_quality_score"],
                 row["evaluation_mode"],
                 row["judge_model_name"],
+                row["expected_source_match"],
+                row["first_relevant_rank"],
+                row["retrieved_chunk_count"],
+                row["precision_at_k"],
+                row["recall_at_k"],
+                row["reciprocal_rank"],
+                row["missing_evidence"],
             ]
         )
 
@@ -1391,6 +1682,7 @@ def run_automated_clear_rag_evaluation(
                 evaluation_mode="automated",
                 judge_model_name=judgment.judge_model_name,
                 judge_reasoning=judgment.judge_reasoning,
+                review_status="pending_review",
             )
             evaluation.overall_score = calculate_overall_score(evaluation)
             db.add(evaluation)
@@ -1581,6 +1873,10 @@ def create_evaluation_record(
         generated_answer_id=answer_id,
         reviewer_user_id=current_user.id,
         overall_score=Decimal("1.00"),
+        evaluation_mode="human",
+        review_status="approved",
+        reviewed_by_user_id=current_user.id,
+        reviewed_at=datetime.now(timezone.utc),
     )
     evaluation.overall_score = calculate_overall_score(evaluation)
     db.add(evaluation)
@@ -1627,6 +1923,61 @@ def update_evaluation_record(
     evaluation = get_evaluation_or_404(db, run_id, evaluation_id)
     apply_updates(evaluation, payload)
     evaluation.overall_score = calculate_overall_score(evaluation)
+    db.commit()
+    db.refresh(evaluation)
+    return evaluation
+
+
+@router.patch(
+    "/{project_id}/runs/{run_id}/evaluations/{evaluation_id}/review",
+    response_model=EvaluationRecordRead,
+)
+def review_evaluation_record(
+    project_id: int,
+    run_id: int,
+    evaluation_id: int,
+    payload: EvaluationReviewUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: WritableUser,
+) -> EvaluationRecord:
+    get_project_or_404(db, project_id)
+    get_run_or_404(db, project_id, run_id)
+    evaluation = get_evaluation_or_404(db, run_id, evaluation_id)
+    score_fields = [
+        "citation_quality_score",
+        "latency_cost_score",
+        "evidence_faithfulness_score",
+        "answer_relevance_score",
+        "retrieval_quality_score",
+    ]
+    requested_score_changes = {
+        field_name: getattr(payload, field_name)
+        for field_name in score_fields
+        if getattr(payload, field_name) is not None and getattr(payload, field_name) != getattr(evaluation, field_name)
+    }
+    if requested_score_changes and not payload.score_change_reason:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="score_change_reason is required when changing scores.",
+        )
+
+    for field_name in score_fields:
+        if field_name in requested_score_changes:
+            setattr(evaluation, field_name, requested_score_changes[field_name])
+
+    if requested_score_changes:
+        evaluation.overall_score = calculate_overall_score(evaluation)
+        evaluation.evaluation_mode = "human"
+
+    evaluation.review_status = payload.review_status
+    evaluation.review_notes = payload.review_notes
+    evaluation.score_change_reason = payload.score_change_reason
+    if payload.reviewer_notes is not None:
+        evaluation.reviewer_notes = payload.reviewer_notes
+    if payload.suggested_improvement is not None:
+        evaluation.suggested_improvement = payload.suggested_improvement
+    evaluation.reviewed_by_user_id = current_user.id
+    evaluation.reviewed_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(evaluation)
     return evaluation

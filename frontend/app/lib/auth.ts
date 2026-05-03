@@ -149,6 +149,11 @@ export type EvaluationRecord = {
   evaluation_mode: "human" | "automated";
   judge_model_name: string | null;
   judge_reasoning: string | null;
+  review_status: "pending_review" | "approved" | "needs_revision";
+  reviewed_by_user_id: number | null;
+  reviewed_at: string | null;
+  review_notes: string | null;
+  score_change_reason: string | null;
   citation_quality_score: number;
   latency_cost_score: number;
   evidence_faithfulness_score: number;
@@ -159,6 +164,55 @@ export type EvaluationRecord = {
   suggested_improvement: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type ReviewDashboardItem = {
+  question_id: number;
+  question_text: string;
+  question_type: string;
+  expected_source: string | null;
+  answer_id: number;
+  answer_text: string;
+  model_name: string | null;
+  evaluation_id: number | null;
+  evaluation_mode: "human" | "automated" | null;
+  review_status: "pending_review" | "approved" | "needs_revision";
+  overall_score: string | null;
+  citation_quality_score: number | null;
+  latency_cost_score: number | null;
+  evidence_faithfulness_score: number | null;
+  answer_relevance_score: number | null;
+  retrieval_quality_score: number | null;
+  judge_model_name: string | null;
+  judge_reasoning: string | null;
+  reviewer_notes: string | null;
+  suggested_improvement: string | null;
+  review_notes: string | null;
+  score_change_reason: string | null;
+  reviewed_by_user_id: number | null;
+  reviewed_at: string | null;
+  retrieved_chunks: Array<{
+    id: number;
+    rank: number;
+    source_document_id: number;
+    section_reference: string | null;
+    relevance_label: "high" | "medium" | "low" | "irrelevant" | null;
+    chunk_text: string;
+  }>;
+};
+
+export type RunReviewDashboard = {
+  project_id: number;
+  run_id: number;
+  run_name: string;
+  total_answers: number;
+  pending_review_count: number;
+  approved_count: number;
+  needs_revision_count: number;
+  review_completion_percent: string;
+  ready_for_release: boolean;
+  approved_average_overall_score: string | null;
+  items: ReviewDashboardItem[];
 };
 
 export type AutoEvaluationResult = {
@@ -196,6 +250,37 @@ export type DimensionScores = {
   retrieval_quality_score: string | null;
 };
 
+export type RetrievalQuestionMetric = {
+  question_id: number;
+  question_text: string;
+  expected_source: string | null;
+  expected_source_available: boolean;
+  retrieved_chunk_count: number;
+  relevant_chunk_count: number;
+  expected_source_match: boolean | null;
+  first_relevant_rank: number | null;
+  precision_at_k: string | null;
+  recall_at_k: string | null;
+  reciprocal_rank: string | null;
+  missing_evidence: boolean;
+};
+
+export type RetrievalMetrics = {
+  project_id: number;
+  run_id: number;
+  evaluated_question_count: number;
+  questions_with_expected_source: number;
+  questions_with_retrieved_chunks: number;
+  expected_source_hit_count: number;
+  missing_evidence_count: number;
+  hit_rate: string | null;
+  precision_at_k: string | null;
+  recall_at_k: string | null;
+  mean_reciprocal_rank: string | null;
+  chunk_coverage: string | null;
+  question_metrics: RetrievalQuestionMetric[];
+};
+
 export type RunQuestionResult = {
   question_id: number;
   question_text: string;
@@ -210,6 +295,16 @@ export type RunQuestionResult = {
   retrieval_quality_score: number | null;
   evaluation_mode: "human" | "automated" | null;
   judge_model_name: string | null;
+  review_status: "pending_review" | "approved" | "needs_revision" | null;
+  reviewed_by_user_id: number | null;
+  reviewed_at: string | null;
+  expected_source_match: boolean | null;
+  first_relevant_rank: number | null;
+  retrieved_chunk_count: number;
+  precision_at_k: string | null;
+  recall_at_k: string | null;
+  reciprocal_rank: string | null;
+  missing_evidence: boolean;
 };
 
 export type RunSummary = {
@@ -223,6 +318,7 @@ export type RunSummary = {
   average_overall_score: string | null;
   dimension_averages: DimensionScores;
   weakest_dimension: string | null;
+  retrieval_metrics: RetrievalMetrics;
   question_results: RunQuestionResult[];
 };
 

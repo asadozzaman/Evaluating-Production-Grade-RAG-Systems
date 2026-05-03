@@ -364,6 +364,10 @@ class EvaluationRecord(TimestampMixin, Base):
         CheckConstraint("retrieval_quality_score BETWEEN 1 AND 5", name="ck_evaluation_records_retrieval_quality_score"),
         CheckConstraint("overall_score BETWEEN 1 AND 5", name="ck_evaluation_records_overall_score"),
         CheckConstraint("evaluation_mode IN ('human', 'automated')", name="ck_evaluation_records_evaluation_mode"),
+        CheckConstraint(
+            "review_status IN ('pending_review', 'approved', 'needs_revision')",
+            name="ck_evaluation_records_review_status",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -394,8 +398,14 @@ class EvaluationRecord(TimestampMixin, Base):
     evaluation_mode: Mapped[str] = mapped_column(String(30), default="human", server_default="human", nullable=False)
     judge_model_name: Mapped[str | None] = mapped_column(String(120))
     judge_reasoning: Mapped[str | None] = mapped_column(Text)
+    review_status: Mapped[str] = mapped_column(String(30), default="pending_review", server_default="pending_review", nullable=False)
+    reviewed_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_notes: Mapped[str | None] = mapped_column(Text)
+    score_change_reason: Mapped[str | None] = mapped_column(Text)
 
     evaluation_run: Mapped[EvaluationRun] = relationship(back_populates="evaluation_records")
     test_question: Mapped[TestQuestion] = relationship(back_populates="evaluation_records")
     generated_answer: Mapped[GeneratedAnswer] = relationship(back_populates="evaluation_records")
     reviewer: Mapped[User] = relationship(foreign_keys=[reviewer_user_id])
+    reviewed_by: Mapped[User | None] = relationship(foreign_keys=[reviewed_by_user_id])

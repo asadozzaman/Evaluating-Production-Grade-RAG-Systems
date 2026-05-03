@@ -680,6 +680,114 @@ Frontend flow:
 8. Open the created run from the Runs list to inspect chunks, answers, scores, and exports.
 ```
 
+## Evaluation Review Workflow
+
+Phase 14 adds human review controls for automated CLEAR-RAG results.
+
+Review dashboard endpoint:
+
+```text
+GET /projects/{project_id}/runs/{run_id}/review-dashboard
+```
+
+The dashboard returns:
+
+```text
+all generated answers for the run
+question and expected source
+generated answer text
+retrieved evidence chunks
+latest CLEAR-RAG scores
+judge reasoning
+review status
+approved/pending/needs-revision counts
+ready_for_release quality gate
+approved average score
+```
+
+Review or override an evaluation:
+
+```text
+PATCH /projects/{project_id}/runs/{run_id}/evaluations/{evaluation_id}/review
+```
+
+Example approve request:
+
+```json
+{
+  "review_status": "approved",
+  "review_notes": "Automated score is acceptable for reporting."
+}
+```
+
+Example score override request:
+
+```json
+{
+  "review_status": "needs_revision",
+  "citation_quality_score": 3,
+  "review_notes": "Citation points to the right document but not the exact policy section.",
+  "score_change_reason": "Human reviewer found the citation less specific than the automated judge rated."
+}
+```
+
+Review statuses:
+
+```text
+pending_review
+approved
+needs_revision
+```
+
+The run page now includes an Evaluation Review panel. A run is marked ready only when every generated answer has an approved evaluation.
+
+## Advanced Retrieval Evaluation
+
+Phase 15 adds retrieval-specific metrics so the system can evaluate whether the retriever found the right evidence before judging generated answers.
+
+Retrieval metrics endpoint:
+
+```text
+GET /projects/{project_id}/runs/{run_id}/retrieval-metrics
+```
+
+The metrics are also included inside:
+
+```text
+GET /projects/{project_id}/runs/{run_id}/summary
+GET /projects/{project_id}/runs/{run_id}/export.json
+GET /projects/{project_id}/runs/{run_id}/export.csv
+```
+
+The backend compares each question's `expected_source` with the ranked retrieved chunks using the source document title, source URI, section reference, and chunk text.
+
+Run-level metrics:
+
+```text
+hit_rate
+precision_at_k
+recall_at_k
+mean_reciprocal_rank
+chunk_coverage
+missing_evidence_count
+expected_source_hit_count
+```
+
+Question-level metrics:
+
+```text
+expected_source_match
+first_relevant_rank
+retrieved_chunk_count
+relevant_chunk_count
+precision_at_k
+recall_at_k
+reciprocal_rank
+missing_evidence
+```
+
+The run page now shows a Retrieval Metrics section inside Evaluation Summary, including hit rate, Precision@3, Recall@3, MRR, chunk coverage, and missing evidence.
+
 ## Start the Frontend
 
 In a separate terminal:

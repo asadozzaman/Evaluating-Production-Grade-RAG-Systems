@@ -48,6 +48,7 @@ SourceKind = Literal["uri", "file"]
 RelevanceLabel = Literal["high", "medium", "low", "irrelevant"]
 RetrievalMode = Literal["keyword", "vector"]
 EvaluationMode = Literal["human", "automated"]
+ReviewStatus = Literal["pending_review", "approved", "needs_revision"]
 
 
 class ProjectCreate(BaseModel):
@@ -323,6 +324,19 @@ class EvaluationRecordUpdate(BaseModel):
         return self
 
 
+class EvaluationReviewUpdate(BaseModel):
+    review_status: ReviewStatus
+    citation_quality_score: int | None = Field(default=None, ge=1, le=5)
+    latency_cost_score: int | None = Field(default=None, ge=1, le=5)
+    evidence_faithfulness_score: int | None = Field(default=None, ge=1, le=5)
+    answer_relevance_score: int | None = Field(default=None, ge=1, le=5)
+    retrieval_quality_score: int | None = Field(default=None, ge=1, le=5)
+    review_notes: str | None = None
+    score_change_reason: str | None = None
+    reviewer_notes: str | None = None
+    suggested_improvement: str | None = None
+
+
 class EvaluationRecordRead(EvaluationRecordCreate):
     model_config = ConfigDict(from_attributes=True)
 
@@ -335,6 +349,11 @@ class EvaluationRecordRead(EvaluationRecordCreate):
     evaluation_mode: EvaluationMode
     judge_model_name: str | None
     judge_reasoning: str | None
+    review_status: ReviewStatus
+    reviewed_by_user_id: int | None
+    reviewed_at: datetime | None
+    review_notes: str | None
+    score_change_reason: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -371,6 +390,47 @@ class RunQuestionResult(BaseModel):
     retrieval_quality_score: int | None
     evaluation_mode: EvaluationMode | None
     judge_model_name: str | None
+    review_status: ReviewStatus | None
+    reviewed_by_user_id: int | None
+    reviewed_at: datetime | None
+    expected_source_match: bool | None
+    first_relevant_rank: int | None
+    retrieved_chunk_count: int
+    precision_at_k: Decimal | None
+    recall_at_k: Decimal | None
+    reciprocal_rank: Decimal | None
+    missing_evidence: bool
+
+
+class RetrievalQuestionMetric(BaseModel):
+    question_id: int
+    question_text: str
+    expected_source: str | None
+    expected_source_available: bool
+    retrieved_chunk_count: int
+    relevant_chunk_count: int
+    expected_source_match: bool | None
+    first_relevant_rank: int | None
+    precision_at_k: Decimal | None
+    recall_at_k: Decimal | None
+    reciprocal_rank: Decimal | None
+    missing_evidence: bool
+
+
+class RetrievalMetricsRead(BaseModel):
+    project_id: int
+    run_id: int
+    evaluated_question_count: int
+    questions_with_expected_source: int
+    questions_with_retrieved_chunks: int
+    expected_source_hit_count: int
+    missing_evidence_count: int
+    hit_rate: Decimal | None
+    precision_at_k: Decimal | None
+    recall_at_k: Decimal | None
+    mean_reciprocal_rank: Decimal | None
+    chunk_coverage: Decimal | None
+    question_metrics: list[RetrievalQuestionMetric]
 
 
 class RunSummaryRead(BaseModel):
@@ -384,7 +444,61 @@ class RunSummaryRead(BaseModel):
     average_overall_score: Decimal | None
     dimension_averages: DimensionScores
     weakest_dimension: str | None
+    retrieval_metrics: RetrievalMetricsRead
     question_results: list[RunQuestionResult]
+
+
+class ReviewDashboardChunk(BaseModel):
+    id: int
+    rank: int
+    source_document_id: int
+    section_reference: str | None
+    relevance_label: RelevanceLabel | None
+    chunk_text: str
+
+
+class ReviewDashboardItem(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    question_id: int
+    question_text: str
+    question_type: QuestionType
+    expected_source: str | None
+    answer_id: int
+    answer_text: str
+    model_name: str | None
+    evaluation_id: int | None
+    evaluation_mode: EvaluationMode | None
+    review_status: ReviewStatus
+    overall_score: Decimal | None
+    citation_quality_score: int | None
+    latency_cost_score: int | None
+    evidence_faithfulness_score: int | None
+    answer_relevance_score: int | None
+    retrieval_quality_score: int | None
+    judge_model_name: str | None
+    judge_reasoning: str | None
+    reviewer_notes: str | None
+    suggested_improvement: str | None
+    review_notes: str | None
+    score_change_reason: str | None
+    reviewed_by_user_id: int | None
+    reviewed_at: datetime | None
+    retrieved_chunks: list[ReviewDashboardChunk]
+
+
+class RunReviewDashboardRead(BaseModel):
+    project_id: int
+    run_id: int
+    run_name: str
+    total_answers: int
+    pending_review_count: int
+    approved_count: int
+    needs_revision_count: int
+    review_completion_percent: Decimal
+    ready_for_release: bool
+    approved_average_overall_score: Decimal | None
+    items: list[ReviewDashboardItem]
 
 
 class BatchExperimentRead(BaseModel):

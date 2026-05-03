@@ -14,6 +14,7 @@ import {
   RetrievedChunk,
   SourceDocument,
   TOKEN_STORAGE_KEY,
+  RunReviewDashboard,
   RunSummary,
   TestQuestion,
   authRequest,
@@ -47,6 +48,7 @@ export default function RunOutputPage() {
   const [answers, setAnswers] = useState<GeneratedAnswer[]>([]);
   const [evaluations, setEvaluations] = useState<EvaluationRecord[]>([]);
   const [summary, setSummary] = useState<RunSummary | null>(null);
+  const [reviewDashboard, setReviewDashboard] = useState<RunReviewDashboard | null>(null);
   const [executionResult, setExecutionResult] = useState<RagExecutionResult | null>(null);
   const [autoEvaluationResult, setAutoEvaluationResult] = useState<AutoEvaluationResult | null>(null);
   const [retrievalMode, setRetrievalMode] = useState<"keyword" | "vector">("keyword");
@@ -106,12 +108,20 @@ export default function RunOutputPage() {
     if (!token) {
       return;
     }
-    const summaryData = await authRequest<RunSummary>(
-      `/projects/${projectId}/runs/${runId}/summary`,
-      { method: "GET" },
-      token,
-    );
+    const [summaryData, reviewDashboardData] = await Promise.all([
+      authRequest<RunSummary>(
+        `/projects/${projectId}/runs/${runId}/summary`,
+        { method: "GET" },
+        token,
+      ),
+      authRequest<RunReviewDashboard>(
+        `/projects/${projectId}/runs/${runId}/review-dashboard`,
+        { method: "GET" },
+        token,
+      ),
+    ]);
     setSummary(summaryData);
+    setReviewDashboard(reviewDashboardData);
   }, [getToken, projectId, runId]);
 
   const loadPage = useCallback(async () => {
@@ -121,18 +131,20 @@ export default function RunOutputPage() {
     }
 
     try {
-      const [projectData, runData, documentData, questionData, summaryData] = await Promise.all([
+      const [projectData, runData, documentData, questionData, summaryData, reviewDashboardData] = await Promise.all([
         authRequest<Project>(`/projects/${projectId}`, { method: "GET" }, token),
         authRequest<EvaluationRun>(`/projects/${projectId}/runs/${runId}`, { method: "GET" }, token),
         authRequest<SourceDocument[]>(`/projects/${projectId}/documents`, { method: "GET" }, token),
         authRequest<TestQuestion[]>(`/projects/${projectId}/questions`, { method: "GET" }, token),
         authRequest<RunSummary>(`/projects/${projectId}/runs/${runId}/summary`, { method: "GET" }, token),
+        authRequest<RunReviewDashboard>(`/projects/${projectId}/runs/${runId}/review-dashboard`, { method: "GET" }, token),
       ]);
       setProject(projectData);
       setRun(runData);
       setDocuments(documentData);
       setQuestions(questionData);
       setSummary(summaryData);
+      setReviewDashboard(reviewDashboardData);
       const firstQuestionId = questionData[0] ? String(questionData[0].id) : "";
       setSelectedQuestionId((current) => current || firstQuestionId);
       if (firstQuestionId) {
@@ -322,6 +334,46 @@ export default function RunOutputPage() {
     }
   }
 
+  async function submitReview(evaluationId: number, event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    const token = getToken();
+    if (!token) {
+      return;
+    }
+
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    try {
+      await authRequest<EvaluationRecord>(
+        `/projects/${projectId}/runs/${runId}/evaluations/${evaluationId}/review`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            review_status: String(formData.get("reviewStatus") ?? "approved"),
+            citation_quality_score: optionalNumber(formData.get("citationQualityScore")),
+            latency_cost_score: optionalNumber(formData.get("latencyCostScore")),
+            evidence_faithfulness_score: optionalNumber(formData.get("evidenceFaithfulnessScore")),
+            answer_relevance_score: optionalNumber(formData.get("answerRelevanceScore")),
+            retrieval_quality_score: optionalNumber(formData.get("retrievalQualityScore")),
+            review_notes: optionalString(formData.get("reviewNotes")),
+            score_change_reason: optionalString(formData.get("scoreChangeReason")),
+            reviewer_notes: optionalString(formData.get("reviewerNotes")),
+            suggested_improvement: optionalString(formData.get("suggestedImprovement")),
+          }),
+        },
+        token,
+      );
+      form.reset();
+      if (selectedQuestionId) {
+        await loadOutputs(selectedQuestionId);
+      }
+      await loadSummary();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to save review decision");
+    }
+  }
+
   async function downloadExport(format: "csv" | "json") {
     const token = getToken();
     if (!token) {
@@ -434,6 +486,9 @@ export default function RunOutputPage() {
         </div>
 
         {summary ? <RunAnalytics summary={summary} onDownload={downloadExport} /> : null}
+        {reviewDashboard ? (
+          <ReviewDashboard dashboard={reviewDashboard} onSubmitReview={submitReview} />
+        ) : null}
 
         <div className="status run-selector">
           <label>
@@ -587,6 +642,17 @@ function RunAnalytics({
           );
         })}
       </div>
+      <div className="dimension-list">
+        <h3>Retrieval Metrics</h3>
+        <div className="metric-grid">
+          <MetricCard label="Hit Rate" value={formatMetric(summary.retrieval_metrics.hit_rate)} />
+          <MetricCard label="Precision@3" value={formatMetric(summary.retrieval_metrics.precision_at_k)} />
+          <MetricCard label="Recall@3" value={formatMetric(summary.retrieval_metrics.recall_at_k)} />
+          <MetricCard label="MRR" value={formatMetric(summary.retrieval_metrics.mean_reciprocal_rank)} />
+          <MetricCard label="Chunk Coverage" value={formatMetric(summary.retrieval_metrics.chunk_coverage)} />
+          <MetricCard label="Missing Evidence" value={summary.retrieval_metrics.missing_evidence_count} />
+        </div>
+      </div>
       <div className="question-results">
         <h3>Question Results</h3>
         {summary.question_results.map((result) => (
@@ -599,9 +665,101 @@ function RunAnalytics({
                 {result.judge_model_name ? ` / ${result.judge_model_name}` : ""}
               </span>
             ) : null}
+            <span>
+              Retrieval: {formatExpectedSourceMatch(result.expected_source_match)} / chunks {result.retrieved_chunk_count}
+              {result.first_relevant_rank ? ` / first match rank ${result.first_relevant_rank}` : ""}
+              {result.missing_evidence ? " / missing evidence" : ""}
+            </span>
             {result.answer_text ? <p>{result.answer_text}</p> : <p>No generated answer yet.</p>}
           </div>
         ))}
+      </div>
+    </section>
+  );
+}
+
+function ReviewDashboard({
+  dashboard,
+  onSubmitReview,
+}: Readonly<{
+  dashboard: RunReviewDashboard;
+  onSubmitReview: (evaluationId: number, event: FormEvent<HTMLFormElement>) => void;
+}>) {
+  return (
+    <section className="status analytics-panel">
+      <div className="section-heading">
+        <h2>Evaluation Review</h2>
+        <span>{dashboard.ready_for_release ? "Ready" : "In review"}</span>
+      </div>
+      <div className="metric-grid">
+        <MetricCard label="Answers" value={dashboard.total_answers} />
+        <MetricCard label="Pending" value={dashboard.pending_review_count} />
+        <MetricCard label="Approved" value={dashboard.approved_count} />
+        <MetricCard label="Needs Revision" value={dashboard.needs_revision_count} />
+        <MetricCard label="Approved Completion" value={`${dashboard.review_completion_percent}%`} />
+        <MetricCard label="Approved Average" value={dashboard.approved_average_overall_score ?? "Not approved"} />
+      </div>
+      <div className="question-results">
+        {dashboard.items.length === 0 ? (
+          <p className="muted">Run Gemini RAG and automated CLEAR-RAG evaluation before reviewing answers.</p>
+        ) : (
+          dashboard.items.map((item) => (
+            <div className="review-card" key={item.answer_id}>
+              <div className="status-row">
+                <strong>{item.question_text}</strong>
+                <span>{formatReviewStatus(item.review_status)}</span>
+              </div>
+              <p>{item.answer_text}</p>
+              <span>
+                {item.evaluation_mode ? `${item.evaluation_mode} score` : "No score"} / Overall{" "}
+                {item.overall_score ?? "not scored"}
+                {item.judge_model_name ? ` / ${item.judge_model_name}` : ""}
+              </span>
+              <span>
+                Citation {item.citation_quality_score ?? "n/a"} / Latency {item.latency_cost_score ?? "n/a"} / Faithfulness{" "}
+                {item.evidence_faithfulness_score ?? "n/a"} / Relevance {item.answer_relevance_score ?? "n/a"} / Retrieval{" "}
+                {item.retrieval_quality_score ?? "n/a"}
+              </span>
+              {item.judge_reasoning ? <p>{item.judge_reasoning}</p> : null}
+              {item.reviewer_notes ? <p>{item.reviewer_notes}</p> : null}
+              {item.review_notes ? <span>Reviewer decision: {item.review_notes}</span> : null}
+              {item.score_change_reason ? <span>Score change: {item.score_change_reason}</span> : null}
+              {item.retrieved_chunks.length > 0 ? (
+                <div className="mini-list">
+                  {item.retrieved_chunks.map((chunk) => (
+                    <div className="mini-list-item" key={chunk.id}>
+                      <strong>
+                        Evidence {chunk.rank}: {chunk.section_reference ?? "No section"}
+                      </strong>
+                      <p>{chunk.chunk_text}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              {item.evaluation_id ? (
+                <form className="compact-form" onSubmit={(event) => onSubmitReview(item.evaluation_id as number, event)}>
+                  <select name="reviewStatus" defaultValue={item.review_status}>
+                    <option value="pending_review">Pending review</option>
+                    <option value="approved">Approved</option>
+                    <option value="needs_revision">Needs revision</option>
+                  </select>
+                  <ScoreInput name="citationQualityScore" label="Citation quality" value={item.citation_quality_score} />
+                  <ScoreInput name="latencyCostScore" label="Latency and cost" value={item.latency_cost_score} />
+                  <ScoreInput name="evidenceFaithfulnessScore" label="Evidence faithfulness" value={item.evidence_faithfulness_score} />
+                  <ScoreInput name="answerRelevanceScore" label="Answer relevance" value={item.answer_relevance_score} />
+                  <ScoreInput name="retrievalQualityScore" label="Retrieval quality" value={item.retrieval_quality_score} />
+                  <textarea name="reviewNotes" placeholder="Review notes" rows={3} defaultValue={item.review_notes ?? ""} />
+                  <textarea name="scoreChangeReason" placeholder="Reason if scores changed" rows={3} defaultValue={item.score_change_reason ?? ""} />
+                  <textarea name="reviewerNotes" placeholder="Final evaluator notes" rows={3} defaultValue={item.reviewer_notes ?? ""} />
+                  <textarea name="suggestedImprovement" placeholder="Suggested improvement" rows={3} defaultValue={item.suggested_improvement ?? ""} />
+                  <button type="submit">Save review decision</button>
+                </form>
+              ) : (
+                <p className="muted">No evaluation record exists for this answer yet.</p>
+              )}
+            </div>
+          ))
+        )}
       </div>
     </section>
   );
@@ -614,6 +772,36 @@ function MetricCard({ label, value }: Readonly<{ label: string; value: string | 
       <strong>{value}</strong>
     </div>
   );
+}
+
+function formatMetric(value: string | null): string {
+  return value ?? "n/a";
+}
+
+function formatExpectedSourceMatch(value: boolean | null): string {
+  if (value === null) {
+    return "No expected source";
+  }
+  return value ? "Expected source matched" : "Expected source missed";
+}
+
+function ScoreInput({ name, label, value }: Readonly<{ name: string; label: string; value: number | null }>) {
+  return (
+    <label>
+      {label}
+      <input name={name} type="number" min={1} max={5} defaultValue={value ?? ""} placeholder="1-5" />
+    </label>
+  );
+}
+
+function formatReviewStatus(value: "pending_review" | "approved" | "needs_revision" | null): string {
+  if (value === "approved") {
+    return "Approved";
+  }
+  if (value === "needs_revision") {
+    return "Needs revision";
+  }
+  return "Pending review";
 }
 
 function SetupSection({
@@ -666,6 +854,7 @@ function EvaluationReviewList({
                       {evaluation.evaluation_mode === "automated" ? "Automated judge" : "Human review"}
                       {evaluation.judge_model_name ? ` / ${evaluation.judge_model_name}` : ""}
                     </span>
+                    <span>Review status: {formatReviewStatus(evaluation.review_status)}</span>
                     <span>
                       Citation {evaluation.citation_quality_score} / Latency {evaluation.latency_cost_score} / Faithfulness {evaluation.evidence_faithfulness_score} / Relevance {evaluation.answer_relevance_score} / Retrieval {evaluation.retrieval_quality_score}
                     </span>

@@ -588,6 +588,112 @@ def test_clear_rag_evaluation_scoring_and_role_access(
     assert delete_evaluation.status_code == 204
 
 
+def test_advanced_retrieval_metrics_for_expected_source_matches(
+    client_and_db: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, db_factory = client_and_db
+    create_user(db_factory, "admin@example.com", "admin")
+    create_user(db_factory, "viewer@example.com", "viewer")
+    admin_token = login(client, "admin@example.com")
+    viewer_token = login(client, "viewer@example.com")
+    graph = create_setup_graph(client, admin_token, "Advanced Retrieval Metrics")
+
+    distractor_document = client.post(
+        f"/projects/{graph['project_id']}/documents",
+        json={
+            "title": "Benefits Handbook",
+            "document_type": "policy",
+            "source_kind": "uri",
+            "source_uri": "memory://benefits-handbook",
+            "version": "v1",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert distractor_document.status_code == 201, distractor_document.text
+
+    missing_question = client.post(
+        f"/projects/{graph['project_id']}/questions",
+        json={
+            "question_text": "How often are payroll audits performed?",
+            "question_type": "simple_factual",
+            "expected_source": "Payroll Policy",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert missing_question.status_code == 201, missing_question.text
+
+    chunk_path = (
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}"
+        f"/questions/{graph['question_id']}/retrieved-chunks"
+    )
+    first_chunk = client.post(
+        chunk_path,
+        json={
+            "source_document_id": distractor_document.json()["id"],
+            "rank": 1,
+            "chunk_text": "This benefits handbook chunk talks about wellness reimbursements.",
+            "section_reference": "Benefits Section 4",
+            "relevance_label": "low",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert first_chunk.status_code == 201, first_chunk.text
+    second_chunk = client.post(
+        chunk_path,
+        json={
+            "source_document_id": graph["document_id"],
+            "rank": 2,
+            "chunk_text": "Full-time employees receive 20 days of annual leave after one year.",
+            "section_reference": "HR Leave Policy, Section 1.1",
+            "relevance_label": "high",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert second_chunk.status_code == 201, second_chunk.text
+
+    metrics = client.get(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/retrieval-metrics",
+        headers=auth_headers(viewer_token),
+    )
+    assert metrics.status_code == 200, metrics.text
+    payload = metrics.json()
+    assert payload["evaluated_question_count"] == 2
+    assert payload["questions_with_expected_source"] == 2
+    assert payload["questions_with_retrieved_chunks"] == 1
+    assert payload["expected_source_hit_count"] == 1
+    assert payload["missing_evidence_count"] == 1
+    assert payload["hit_rate"] == "0.50"
+    assert payload["precision_at_k"] == "0.25"
+    assert payload["recall_at_k"] == "0.50"
+    assert payload["mean_reciprocal_rank"] == "0.25"
+    assert payload["chunk_coverage"] == "0.50"
+
+    first_question_metric = next(item for item in payload["question_metrics"] if item["question_id"] == graph["question_id"])
+    assert first_question_metric["expected_source_match"] is True
+    assert first_question_metric["first_relevant_rank"] == 2
+    assert first_question_metric["precision_at_k"] == "0.50"
+    assert first_question_metric["reciprocal_rank"] == "0.50"
+
+    missing_question_metric = next(item for item in payload["question_metrics"] if item["question_id"] == missing_question.json()["id"])
+    assert missing_question_metric["expected_source_match"] is False
+    assert missing_question_metric["missing_evidence"] is True
+
+    summary = client.get(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/summary",
+        headers=auth_headers(viewer_token),
+    )
+    assert summary.status_code == 200
+    assert summary.json()["retrieval_metrics"]["missing_evidence_count"] == 1
+    assert summary.json()["question_results"][0]["retrieved_chunk_count"] == 2
+
+    csv_export = client.get(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/export.csv",
+        headers=auth_headers(viewer_token),
+    )
+    assert csv_export.status_code == 200
+    assert "expected_source_match,first_relevant_rank,retrieved_chunk_count" in csv_export.text
+
+
 def test_automated_clear_rag_evaluation_and_role_access(
     client_and_db: tuple[TestClient, sessionmaker[Session]],
     monkeypatch: pytest.MonkeyPatch,
@@ -695,6 +801,58 @@ def test_automated_clear_rag_evaluation_and_role_access(
     assert payload[0]["overall_score"] == "4.60"
     assert payload[0]["judge_model_name"] == "gemini-judge-test"
     assert payload[0]["judge_reasoning"] == "The answer directly uses the retrieved annual leave evidence."
+    assert payload[0]["review_status"] == "pending_review"
+    evaluation_id = payload[0]["id"]
+
+    review_dashboard = client.get(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/review-dashboard",
+        headers=auth_headers(viewer_token),
+    )
+    assert review_dashboard.status_code == 200, review_dashboard.text
+    review_payload = review_dashboard.json()
+    assert review_payload["total_answers"] == 1
+    assert review_payload["pending_review_count"] == 1
+    assert review_payload["approved_count"] == 0
+    assert review_payload["ready_for_release"] is False
+    assert review_payload["items"][0]["evaluation_id"] == evaluation_id
+    assert review_payload["items"][0]["retrieved_chunks"][0]["rank"] == 1
+
+    viewer_review = client.patch(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/evaluations/{evaluation_id}/review",
+        json={"review_status": "approved", "review_notes": "Looks good."},
+        headers=auth_headers(viewer_token),
+    )
+    assert viewer_review.status_code == 403
+
+    approve_review = client.patch(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/evaluations/{evaluation_id}/review",
+        json={"review_status": "approved", "review_notes": "Approved automated judge score."},
+        headers=auth_headers(admin_token),
+    )
+    assert approve_review.status_code == 200, approve_review.text
+    assert approve_review.json()["review_status"] == "approved"
+    assert approve_review.json()["reviewed_by_user_id"] is not None
+    assert approve_review.json()["reviewed_at"] is not None
+
+    reviewed_dashboard = client.get(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/review-dashboard",
+        headers=auth_headers(viewer_token),
+    )
+    assert reviewed_dashboard.status_code == 200
+    assert reviewed_dashboard.json()["ready_for_release"] is True
+    assert reviewed_dashboard.json()["approved_count"] == 1
+    assert reviewed_dashboard.json()["approved_average_overall_score"] == "4.60"
+
+    missing_reason = client.patch(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/evaluations/{evaluation_id}/review",
+        json={
+            "review_status": "needs_revision",
+            "citation_quality_score": 3,
+            "review_notes": "Citation is too broad.",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert missing_reason.status_code == 422
 
     repeat_auto_eval = client.post(
         f"/projects/{graph['project_id']}/runs/{graph['run_id']}/auto-evaluate",
