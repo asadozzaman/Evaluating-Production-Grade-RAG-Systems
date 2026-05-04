@@ -321,6 +321,54 @@ export type ErrorTaxonomyReport = {
   items: ErrorTaxonomyItem[];
 };
 
+export type ProductionReadinessGate = {
+  key: string;
+  label: string;
+  status: "pass" | "warning" | "fail" | string;
+  required: boolean;
+  observed_value: string | null;
+  threshold: string | null;
+  message: string;
+};
+
+export type ProductionReadinessReport = {
+  project_id: number;
+  run_id: number;
+  run_name: string;
+  ready_for_production: boolean;
+  passed_count: number;
+  warning_count: number;
+  blocking_failure_count: number;
+  gates: ProductionReadinessGate[];
+};
+
+export type ReportAudience = "executive" | "technical" | "audit";
+
+export type ReportSectionKey =
+  | "overview"
+  | "readiness"
+  | "scores"
+  | "retrieval"
+  | "calibration"
+  | "errors"
+  | "questions";
+
+export type BuiltReportSection = {
+  key: ReportSectionKey;
+  title: string;
+  content: string;
+};
+
+export type BuiltReport = {
+  project_id: number;
+  run_id: number;
+  title: string;
+  audience: ReportAudience;
+  generated_at: string;
+  sections: BuiltReportSection[];
+  markdown: string;
+};
+
 export type AutoEvaluationResult = {
   run_id: number;
   evaluated_answers: number;

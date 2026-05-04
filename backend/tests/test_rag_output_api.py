@@ -1349,6 +1349,209 @@ def test_experiment_leaderboard_ranks_runs_by_quality(
     assert payload["runs"][1]["quality_gate"] == "needs_error_review"
 
 
+def test_production_readiness_gates_pass_and_fail(
+    client_and_db: tuple[TestClient, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeGeminiJudgeClient:
+        def __init__(self, settings: object) -> None:
+            self.settings = settings
+
+        def generate_answer(self, prompt: str) -> GeminiAnswer:
+            assert "20 days of annual leave" in prompt
+            return GeminiAnswer(
+                text=(
+                    "{"
+                    '"citation_quality_score": 5,'
+                    '"latency_cost_score": 5,'
+                    '"evidence_faithfulness_score": 5,'
+                    '"answer_relevance_score": 5,'
+                    '"retrieval_quality_score": 5,'
+                    '"reviewer_notes": "Production-ready automated score.",'
+                    '"suggested_improvement": "No change required.",'
+                    '"judge_reasoning": "The answer is fully grounded and cited."'
+                    "}"
+                ),
+                model_name="gemini-readiness-test",
+                input_tokens=100,
+                output_tokens=60,
+                generation_time_ms=15,
+            )
+
+    monkeypatch.setattr("app.routers.projects.GeminiClient", FakeGeminiJudgeClient)
+
+    client, db_factory = client_and_db
+    create_user(db_factory, "admin@example.com", "admin")
+    create_user(db_factory, "viewer@example.com", "viewer")
+    admin_token = login(client, "admin@example.com")
+    viewer_token = login(client, "viewer@example.com")
+    graph = create_setup_graph(client, admin_token, "Production Readiness")
+
+    with db_factory() as db:
+        run = db.get(EvaluationRun, graph["run_id"])
+        assert run is not None
+        run.status = "completed"
+        db.commit()
+
+    chunk = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/questions/{graph['question_id']}/retrieved-chunks",
+        json={
+            "source_document_id": graph["document_id"],
+            "rank": 1,
+            "chunk_text": "HR Leave Policy Section 1.1 states employees receive 20 days of annual leave after one year.",
+            "section_reference": "Section 1.1",
+            "relevance_label": "high",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert chunk.status_code == 201, chunk.text
+
+    answer = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/questions/{graph['question_id']}/generated-answers",
+        json={
+            "answer_text": "Employees receive 20 days of annual leave after one year. [1]",
+            "model_name": "gemini-test",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert answer.status_code == 201, answer.text
+    answer_id = answer.json()["id"]
+
+    auto_eval = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/auto-evaluate",
+        headers=auth_headers(admin_token),
+    )
+    assert auto_eval.status_code == 200, auto_eval.text
+
+    human_eval = client.post(
+        (
+            f"/projects/{graph['project_id']}/runs/{graph['run_id']}"
+            f"/questions/{graph['question_id']}/answers/{answer_id}/evaluations"
+        ),
+        json={
+            "citation_quality_score": 5,
+            "latency_cost_score": 5,
+            "evidence_faithfulness_score": 5,
+            "answer_relevance_score": 5,
+            "retrieval_quality_score": 5,
+            "reviewer_notes": "Human evaluator approves for production.",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert human_eval.status_code == 201, human_eval.text
+
+    readiness = client.get(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/production-readiness",
+        headers=auth_headers(viewer_token),
+    )
+    assert readiness.status_code == 200, readiness.text
+    payload = readiness.json()
+    assert payload["ready_for_production"] is True
+    assert payload["blocking_failure_count"] == 0
+    assert payload["passed_count"] == 8
+    assert {gate["key"]: gate["status"] for gate in payload["gates"]}["judge_calibration"] == "pass"
+    assert {gate["key"]: gate["status"] for gate in payload["gates"]}["retrieval_hit_rate"] == "pass"
+
+    failing_run = client.post(
+        f"/projects/{graph['project_id']}/runs",
+        json={"name": "Incomplete Production Candidate"},
+        headers=auth_headers(admin_token),
+    )
+    assert failing_run.status_code == 201, failing_run.text
+    failing_readiness = client.get(
+        f"/projects/{graph['project_id']}/runs/{failing_run.json()['id']}/production-readiness",
+        headers=auth_headers(viewer_token),
+    )
+    assert failing_readiness.status_code == 200, failing_readiness.text
+    failing_payload = failing_readiness.json()
+    assert failing_payload["ready_for_production"] is False
+    assert failing_payload["blocking_failure_count"] > 0
+    failing_gate_statuses = {gate["key"]: gate["status"] for gate in failing_payload["gates"]}
+    assert failing_gate_statuses["run_completed"] == "fail"
+    assert failing_gate_statuses["answer_coverage"] == "fail"
+    assert failing_gate_statuses["judge_calibration"] == "fail"
+
+
+def test_report_builder_generates_selected_sections(
+    client_and_db: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, db_factory = client_and_db
+    create_user(db_factory, "admin@example.com", "admin")
+    create_user(db_factory, "viewer@example.com", "viewer")
+    admin_token = login(client, "admin@example.com")
+    viewer_token = login(client, "viewer@example.com")
+    graph = create_setup_graph(client, admin_token, "Report Builder")
+
+    with db_factory() as db:
+        run = db.get(EvaluationRun, graph["run_id"])
+        assert run is not None
+        run.status = "completed"
+        run.retrieval_mode = "keyword"
+        db.commit()
+
+    chunk = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/questions/{graph['question_id']}/retrieved-chunks",
+        json={
+            "source_document_id": graph["document_id"],
+            "rank": 1,
+            "chunk_text": "HR Leave Policy Section 1.1 confirms 20 annual leave days after one year.",
+            "section_reference": "Section 1.1",
+            "relevance_label": "high",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert chunk.status_code == 201, chunk.text
+
+    answer = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/questions/{graph['question_id']}/generated-answers",
+        json={"answer_text": "Employees receive 20 days of annual leave after one year. [1]", "model_name": "gemini-test"},
+        headers=auth_headers(admin_token),
+    )
+    assert answer.status_code == 201, answer.text
+
+    evaluation = client.post(
+        (
+            f"/projects/{graph['project_id']}/runs/{graph['run_id']}"
+            f"/questions/{graph['question_id']}/answers/{answer.json()['id']}/evaluations"
+        ),
+        json={
+            "citation_quality_score": 5,
+            "latency_cost_score": 4,
+            "evidence_faithfulness_score": 5,
+            "answer_relevance_score": 5,
+            "retrieval_quality_score": 5,
+            "reviewer_notes": "Report-ready answer.",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert evaluation.status_code == 201, evaluation.text
+
+    report = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/report",
+        json={
+            "title": "HR Policy RAG Release Report",
+            "audience": "executive",
+            "sections": ["overview", "readiness", "scores", "retrieval", "questions"],
+        },
+        headers=auth_headers(viewer_token),
+    )
+    assert report.status_code == 200, report.text
+    payload = report.json()
+    assert payload["title"] == "HR Policy RAG Release Report"
+    assert payload["audience"] == "executive"
+    assert [section["key"] for section in payload["sections"]] == [
+        "overview",
+        "readiness",
+        "scores",
+        "retrieval",
+        "questions",
+    ]
+    assert "# HR Policy RAG Release Report" in payload["markdown"]
+    assert "## Production Readiness" in payload["markdown"]
+    assert "## Retrieval Evaluation" in payload["markdown"]
+    assert "Employees receive 20 days" in payload["markdown"]
+
+
 def test_question_dataset_import_csv_json_validation_and_role_access(
     client_and_db: tuple[TestClient, sessionmaker[Session]],
 ) -> None:

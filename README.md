@@ -933,6 +933,83 @@ scored
 
 The project page now includes an Experiment Leaderboard panel above Run Comparison.
 
+## Production Readiness Gates
+
+Phase 19 adds a run-level readiness checklist for deciding whether an experiment is safe to release.
+
+Readiness endpoint:
+
+```text
+GET /projects/{project_id}/runs/{run_id}/production-readiness
+```
+
+Required gates:
+
+```text
+run_completed
+answer_coverage
+human_review_complete
+minimum_score
+retrieval_hit_rate
+missing_evidence
+judge_calibration
+blocking_errors
+```
+
+Default thresholds:
+
+```text
+minimum approved score: >= 4.00
+retrieval hit rate: >= 0.80
+judge within-one agreement: >= 80.00% with at least one paired answer
+high/critical errors: 0
+missing evidence: 0
+```
+
+The endpoint returns `ready_for_production`, gate counts, and detailed gate messages. The run page now includes a Production Readiness panel before review and calibration details.
+
+## Report Builder
+
+Phase 20 adds a run-level report builder that assembles the current evaluation state into a structured response and Markdown report.
+
+Report endpoint:
+
+```text
+POST /projects/{project_id}/runs/{run_id}/report
+```
+
+Example request:
+
+```json
+{
+  "title": "HR Policy RAG Release Report",
+  "audience": "executive",
+  "sections": ["overview", "readiness", "scores", "retrieval", "calibration", "errors", "questions"]
+}
+```
+
+Supported audiences:
+
+```text
+executive
+technical
+audit
+```
+
+Supported sections:
+
+```text
+overview
+readiness
+scores
+retrieval
+calibration
+errors
+questions
+```
+
+The run page now includes a Report Builder panel that generates a Markdown report from the latest run metrics, readiness gates, calibration data, and error taxonomy.
+
 ## Start the Frontend
 
 In a separate terminal:

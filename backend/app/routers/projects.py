@@ -43,10 +43,13 @@ from app.schemas import (
     ProjectRead,
     ProjectUpdate,
     ProjectSummaryRead,
+    ProductionReadinessRead,
     QuestionDatasetRead,
     QuestionImportRead,
     RagExecutionRequest,
     RagExecutionRead,
+    ReportBuilderRead,
+    ReportBuilderRequest,
     RetrievalMetricsRead,
     RunComparisonRead,
     RunReviewDashboardRead,
@@ -107,6 +110,9 @@ ERROR_SEVERITY_LABELS = {
     "high": "High",
     "critical": "Critical",
 }
+MIN_PRODUCTION_SCORE = Decimal("4.00")
+MIN_RETRIEVAL_HIT_RATE = Decimal("0.80")
+MIN_JUDGE_WITHIN_ONE_AGREEMENT = Decimal("80.00")
 
 
 def get_project_or_404(db: Session, project_id: int) -> Project:
@@ -724,6 +730,292 @@ def build_experiment_leaderboard(db: Session, project: Project) -> dict[str, obj
         "total_runs": len(ranked_rows),
         "best_run_id": ranked_rows[0]["run_id"] if ranked_rows else None,
         "runs": ranked_rows,
+    }
+
+
+def readiness_gate(
+    key: str,
+    label: str,
+    passed: bool,
+    observed_value: str | None,
+    threshold: str | None,
+    pass_message: str,
+    fail_message: str,
+    required: bool = True,
+    warning: bool = False,
+) -> dict[str, object]:
+    if passed:
+        status_value = "pass"
+        message = pass_message
+    elif warning:
+        status_value = "warning"
+        message = fail_message
+    else:
+        status_value = "fail"
+        message = fail_message
+    return {
+        "key": key,
+        "label": label,
+        "status": status_value,
+        "required": required,
+        "observed_value": observed_value,
+        "threshold": threshold,
+        "message": message,
+    }
+
+
+def build_production_readiness(db: Session, project: Project, run: EvaluationRun) -> dict[str, object]:
+    summary = build_run_summary(db, project, run)
+    review_dashboard = build_run_review_dashboard(db, project, run)
+    calibration = build_judge_calibration(db, project, run)
+    taxonomy = build_error_taxonomy(db, project, run)
+    severity_counts = {item["key"]: item["count"] for item in taxonomy["severity_counts"]}
+    high_error_count = int(severity_counts.get("high", 0))
+    critical_error_count = int(severity_counts.get("critical", 0))
+    approved_average = review_dashboard["approved_average_overall_score"]
+    score_for_gate = approved_average or summary["average_overall_score"]
+    retrieval_metrics = summary["retrieval_metrics"]
+    hit_rate = retrieval_metrics["hit_rate"]
+    missing_evidence_count = int(retrieval_metrics["missing_evidence_count"])
+    questions_with_expected_source = int(retrieval_metrics["questions_with_expected_source"])
+    judge_pairs = int(calibration["paired_answer_count"])
+    judge_agreement = calibration["overall_within_one_agreement_percent"]
+
+    gates = [
+        readiness_gate(
+            key="run_completed",
+            label="Run completed",
+            passed=run.status == "completed",
+            observed_value=run.status,
+            threshold="completed",
+            pass_message="Run finished successfully.",
+            fail_message="Run must complete before production release.",
+        ),
+        readiness_gate(
+            key="answer_coverage",
+            label="Answer coverage",
+            passed=summary["total_questions"] > 0 and summary["generated_answers"] >= summary["total_questions"],
+            observed_value=f"{summary['generated_answers']}/{summary['total_questions']}",
+            threshold="all questions answered",
+            pass_message="Every test question has a generated answer.",
+            fail_message="Generate answers for every test question in scope.",
+        ),
+        readiness_gate(
+            key="human_review_complete",
+            label="Human review complete",
+            passed=bool(review_dashboard["ready_for_release"]),
+            observed_value=f"{review_dashboard['approved_count']}/{review_dashboard['total_answers']} approved",
+            threshold="all answers approved",
+            pass_message="All generated answers are approved.",
+            fail_message="Every generated answer needs an approved evaluation.",
+        ),
+        readiness_gate(
+            key="minimum_score",
+            label="Minimum approved score",
+            passed=score_for_gate is not None and score_for_gate >= MIN_PRODUCTION_SCORE,
+            observed_value=str(score_for_gate) if score_for_gate is not None else None,
+            threshold=f">= {MIN_PRODUCTION_SCORE}",
+            pass_message="Approved CLEAR-RAG score meets the production threshold.",
+            fail_message="Approved CLEAR-RAG score is below the production threshold.",
+        ),
+        readiness_gate(
+            key="retrieval_hit_rate",
+            label="Retrieval hit rate",
+            passed=hit_rate is not None and hit_rate >= MIN_RETRIEVAL_HIT_RATE,
+            observed_value=str(hit_rate) if hit_rate is not None else None,
+            threshold=f">= {MIN_RETRIEVAL_HIT_RATE}",
+            pass_message="Retriever is finding expected evidence often enough.",
+            fail_message=(
+                "Add expected sources to questions before enforcing retrieval hit rate."
+                if questions_with_expected_source == 0
+                else "Retrieval hit rate is below the production threshold."
+            ),
+            required=questions_with_expected_source > 0,
+            warning=questions_with_expected_source == 0,
+        ),
+        readiness_gate(
+            key="missing_evidence",
+            label="No missing evidence",
+            passed=missing_evidence_count == 0,
+            observed_value=str(missing_evidence_count),
+            threshold="0",
+            pass_message="No expected-source questions are missing evidence.",
+            fail_message="Some expected-source questions did not retrieve matching evidence.",
+        ),
+        readiness_gate(
+            key="judge_calibration",
+            label="Judge calibration",
+            passed=judge_pairs > 0 and judge_agreement >= MIN_JUDGE_WITHIN_ONE_AGREEMENT,
+            observed_value=f"{judge_agreement}% across {judge_pairs} pairs",
+            threshold=f">= {MIN_JUDGE_WITHIN_ONE_AGREEMENT}% within one point and at least 1 pair",
+            pass_message="Automated judge aligns with human scoring.",
+            fail_message="Add human calibration scores or improve judge agreement before release.",
+        ),
+        readiness_gate(
+            key="blocking_errors",
+            label="No high or critical errors",
+            passed=high_error_count == 0 and critical_error_count == 0,
+            observed_value=f"{high_error_count} high, {critical_error_count} critical",
+            threshold="0 high, 0 critical",
+            pass_message="No blocking error-taxonomy findings remain.",
+            fail_message="Resolve high and critical error taxonomy findings.",
+        ),
+    ]
+    passed_count = sum(1 for gate in gates if gate["status"] == "pass")
+    warning_count = sum(1 for gate in gates if gate["status"] == "warning")
+    blocking_failure_count = sum(1 for gate in gates if gate["required"] and gate["status"] == "fail")
+    return {
+        "project_id": project.id,
+        "run_id": run.id,
+        "run_name": run.name,
+        "ready_for_production": blocking_failure_count == 0,
+        "passed_count": passed_count,
+        "warning_count": warning_count,
+        "blocking_failure_count": blocking_failure_count,
+        "gates": gates,
+    }
+
+
+def format_report_value(value: object) -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return str(value)
+
+
+def report_bullet(label: str, value: object) -> str:
+    return f"- {label}: {format_report_value(value)}"
+
+
+def build_run_report(
+    db: Session,
+    project: Project,
+    run: EvaluationRun,
+    payload: ReportBuilderRequest,
+) -> dict[str, object]:
+    summary = build_run_summary(db, project, run)
+    review_dashboard = build_run_review_dashboard(db, project, run)
+    readiness = build_production_readiness(db, project, run)
+    calibration = build_judge_calibration(db, project, run)
+    taxonomy = build_error_taxonomy(db, project, run)
+    selected_sections = list(dict.fromkeys(payload.sections))
+    title = payload.title or f"{project.name} - {run.name} Evaluation Report"
+    generated_at = datetime.now(timezone.utc)
+
+    section_builders = {
+        "overview": lambda: "\n".join(
+            [
+                report_bullet("Project", project.name),
+                report_bullet("Run", run.name),
+                report_bullet("Audience", payload.audience),
+                report_bullet("Run status", run.status),
+                report_bullet("System version", run.system_version),
+                report_bullet("Retrieval mode", run.retrieval_mode),
+                report_bullet("Generator model", run.generator_model_name),
+                report_bullet("Judge model", run.judge_model_name),
+            ]
+        ),
+        "readiness": lambda: "\n".join(
+            [
+                report_bullet("Ready for production", readiness["ready_for_production"]),
+                report_bullet("Passed gates", readiness["passed_count"]),
+                report_bullet("Warnings", readiness["warning_count"]),
+                report_bullet("Blocking failures", readiness["blocking_failure_count"]),
+                "",
+                *[
+                    f"- {gate['label']}: {gate['status']} ({gate['message']})"
+                    for gate in readiness["gates"]
+                ],
+            ]
+        ),
+        "scores": lambda: "\n".join(
+            [
+                report_bullet("Generated answers", summary["generated_answers"]),
+                report_bullet("Reviewed answers", summary["reviewed_answers"]),
+                report_bullet("Review completion", f"{summary['review_completion_percent']}%"),
+                report_bullet("Average overall score", summary["average_overall_score"]),
+                report_bullet("Approved average score", review_dashboard["approved_average_overall_score"]),
+                report_bullet("Weakest dimension", summary["weakest_dimension"]),
+                "",
+                *[
+                    report_bullet(DIMENSION_LABELS[field], summary["dimension_averages"][field])
+                    for field in SCORE_FIELDS
+                ],
+            ]
+        ),
+        "retrieval": lambda: "\n".join(
+            [
+                report_bullet("Hit rate", summary["retrieval_metrics"]["hit_rate"]),
+                report_bullet("Precision@3", summary["retrieval_metrics"]["precision_at_k"]),
+                report_bullet("Recall@3", summary["retrieval_metrics"]["recall_at_k"]),
+                report_bullet("Mean reciprocal rank", summary["retrieval_metrics"]["mean_reciprocal_rank"]),
+                report_bullet("Chunk coverage", summary["retrieval_metrics"]["chunk_coverage"]),
+                report_bullet("Missing evidence count", summary["retrieval_metrics"]["missing_evidence_count"]),
+            ]
+        ),
+        "calibration": lambda: "\n".join(
+            [
+                report_bullet("Paired answers", calibration["paired_answer_count"]),
+                report_bullet("Exact agreement", f"{calibration['overall_exact_agreement_percent']}%"),
+                report_bullet("Within-one agreement", f"{calibration['overall_within_one_agreement_percent']}%"),
+                report_bullet("Average overall delta", calibration["average_overall_delta"]),
+            ]
+        ),
+        "errors": lambda: "\n".join(
+            [
+                report_bullet("Total error tags", taxonomy["total_errors"]),
+                report_bullet("Affected answers", taxonomy["affected_answers"]),
+                "",
+                *[
+                    f"- {item['label']}: {item['count']} ({item['percent']}%)"
+                    for item in taxonomy["category_counts"]
+                    if item["count"] > 0
+                ],
+            ]
+        ).strip(),
+        "questions": lambda: "\n".join(
+            [
+                f"- Q{result['question_id']}: {result['question_text']} | score {format_report_value(result['overall_score'])} | retrieval {format_report_value(result['expected_source_match'])} | answer {format_report_value(result['answer_text'])}"
+                for result in summary["question_results"]
+            ]
+        ),
+    }
+    section_titles = {
+        "overview": "Overview",
+        "readiness": "Production Readiness",
+        "scores": "CLEAR-RAG Scores",
+        "retrieval": "Retrieval Evaluation",
+        "calibration": "Judge Calibration",
+        "errors": "Error Taxonomy",
+        "questions": "Question Results",
+    }
+    sections = [
+        {
+            "key": section_key,
+            "title": section_titles[section_key],
+            "content": section_builders[section_key](),
+        }
+        for section_key in selected_sections
+    ]
+    markdown_parts = [
+        f"# {title}",
+        "",
+        f"Generated at: {generated_at.isoformat()}",
+        f"Audience: {payload.audience}",
+        "",
+    ]
+    for section in sections:
+        markdown_parts.extend([f"## {section['title']}", "", section["content"], ""])
+
+    return {
+        "project_id": project.id,
+        "run_id": run.id,
+        "title": title,
+        "audience": payload.audience,
+        "generated_at": generated_at,
+        "sections": sections,
+        "markdown": "\n".join(markdown_parts).strip() + "\n",
     }
 
 
@@ -1921,6 +2213,31 @@ def read_run_error_taxonomy(
     project = get_project_or_404(db, project_id)
     run = get_run_or_404(db, project_id, run_id)
     return build_error_taxonomy(db, project, run)
+
+
+@router.get("/{project_id}/runs/{run_id}/production-readiness", response_model=ProductionReadinessRead)
+def read_run_production_readiness(
+    project_id: int,
+    run_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> dict[str, object]:
+    project = get_project_or_404(db, project_id)
+    run = get_run_or_404(db, project_id, run_id)
+    return build_production_readiness(db, project, run)
+
+
+@router.post("/{project_id}/runs/{run_id}/report", response_model=ReportBuilderRead)
+def build_report(
+    project_id: int,
+    run_id: int,
+    payload: ReportBuilderRequest,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> dict[str, object]:
+    project = get_project_or_404(db, project_id)
+    run = get_run_or_404(db, project_id, run_id)
+    return build_run_report(db, project, run, payload)
 
 
 @router.get("/{project_id}/runs/{run_id}/errors", response_model=list[ErrorAnnotationRead])

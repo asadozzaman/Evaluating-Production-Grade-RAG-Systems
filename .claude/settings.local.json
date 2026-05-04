@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir /s /b \"C:\\\\Users\\\\asado\\\\OneDrive\\\\Desktop\\\\Practical Framework for Evaluating Production-Grade Retrieval-Augmented Generation Systems\\\\frontend\\\\app\")",
+      "Bash(grep -E \"\\\\.\\(tsx|css\\)$\")"
+    ]
+  }
+}

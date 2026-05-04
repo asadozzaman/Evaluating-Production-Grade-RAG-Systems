@@ -49,6 +49,8 @@ RelevanceLabel = Literal["high", "medium", "low", "irrelevant"]
 RetrievalMode = Literal["keyword", "vector"]
 EvaluationMode = Literal["human", "automated"]
 ReviewStatus = Literal["pending_review", "approved", "needs_revision"]
+ReportAudience = Literal["executive", "technical", "audit"]
+ReportSection = Literal["overview", "readiness", "scores", "retrieval", "calibration", "errors", "questions"]
 ErrorCategory = Literal[
     "retrieval_miss",
     "citation_error",
@@ -683,6 +685,59 @@ class ExperimentLeaderboardRead(BaseModel):
     total_runs: int
     best_run_id: int | None
     runs: list[ExperimentLeaderboardRunRead]
+
+
+class ProductionReadinessGateRead(BaseModel):
+    key: str
+    label: str
+    status: str
+    required: bool
+    observed_value: str | None
+    threshold: str | None
+    message: str
+
+
+class ProductionReadinessRead(BaseModel):
+    project_id: int
+    run_id: int
+    run_name: str
+    ready_for_production: bool
+    passed_count: int
+    warning_count: int
+    blocking_failure_count: int
+    gates: list[ProductionReadinessGateRead]
+
+
+class ReportBuilderRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=255)
+    audience: ReportAudience = "technical"
+    sections: list[ReportSection] = Field(
+        default_factory=lambda: [
+            "overview",
+            "readiness",
+            "scores",
+            "retrieval",
+            "calibration",
+            "errors",
+            "questions",
+        ]
+    )
+
+
+class ReportSectionRead(BaseModel):
+    key: ReportSection
+    title: str
+    content: str
+
+
+class ReportBuilderRead(BaseModel):
+    project_id: int
+    run_id: int
+    title: str
+    audience: ReportAudience
+    generated_at: datetime
+    sections: list[ReportSectionRead]
+    markdown: str
 
 
 class RunComparisonRunRead(BaseModel):
