@@ -1552,6 +1552,107 @@ def test_report_builder_generates_selected_sections(
     assert "Employees receive 20 days" in payload["markdown"]
 
 
+def test_audit_trail_and_governance_records_key_events(
+    client_and_db: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, db_factory = client_and_db
+    create_user(db_factory, "admin@example.com", "admin")
+    create_user(db_factory, "viewer@example.com", "viewer")
+    admin_token = login(client, "admin@example.com")
+    viewer_token = login(client, "viewer@example.com")
+    graph = create_setup_graph(client, admin_token, "Audit Governance")
+
+    answer = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/questions/{graph['question_id']}/generated-answers",
+        json={
+            "answer_text": "Employees receive 20 days of annual leave after one year.",
+            "model_name": "gemini-test",
+            "input_tokens": 40,
+            "output_tokens": 16,
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert answer.status_code == 201, answer.text
+    answer_id = answer.json()["id"]
+
+    evaluation = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/questions/{graph['question_id']}/answers/{answer_id}/evaluations",
+        json={
+            "citation_quality_score": 5,
+            "latency_cost_score": 4,
+            "evidence_faithfulness_score": 5,
+            "answer_relevance_score": 5,
+            "retrieval_quality_score": 4,
+            "reviewer_notes": "Grounded in the policy.",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert evaluation.status_code == 201, evaluation.text
+    evaluation_id = evaluation.json()["id"]
+
+    error = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/questions/{graph['question_id']}/answers/{answer_id}/errors",
+        json={
+            "category": "citation_error",
+            "severity": "medium",
+            "evaluation_record_id": evaluation_id,
+            "notes": "Citation should include the exact section.",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert error.status_code == 201, error.text
+
+    report = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/report",
+        json={"title": "Audit Report", "audience": "audit", "sections": ["overview", "questions"]},
+        headers=auth_headers(viewer_token),
+    )
+    assert report.status_code == 200, report.text
+
+    project_events = client.get(
+        f"/projects/{graph['project_id']}/audit-events",
+        headers=auth_headers(viewer_token),
+    )
+    assert project_events.status_code == 200, project_events.text
+    event_types = {event["event_type"] for event in project_events.json()}
+    assert {
+        "project_created",
+        "document_registered",
+        "question_created",
+        "run_created",
+        "generated_answer_added",
+        "human_evaluation_created",
+        "error_tag_created",
+        "report_built",
+    }.issubset(event_types)
+
+    run_events = client.get(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/audit-events",
+        headers=auth_headers(viewer_token),
+    )
+    assert run_events.status_code == 200, run_events.text
+    assert all(event["evaluation_run_id"] == graph["run_id"] for event in run_events.json())
+    assert {event["event_type"] for event in run_events.json()} >= {
+        "run_created",
+        "generated_answer_added",
+        "human_evaluation_created",
+        "error_tag_created",
+        "report_built",
+    }
+
+    governance = client.get(
+        f"/projects/{graph['project_id']}/governance-summary",
+        headers=auth_headers(viewer_token),
+    )
+    assert governance.status_code == 200, governance.text
+    payload = governance.json()
+    assert payload["total_events"] >= 8
+    assert payload["active_actor_count"] == 2
+    assert payload["run_event_count"] >= 5
+    assert payload["recent_events"][0]["event_type"] == "report_built"
+    assert any(bucket["key"] == "report_built" for bucket in payload["event_type_counts"])
+
+
 def test_question_dataset_import_csv_json_validation_and_role_access(
     client_and_db: tuple[TestClient, sessionmaker[Session]],
 ) -> None:

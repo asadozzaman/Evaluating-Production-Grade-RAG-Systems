@@ -10,6 +10,7 @@ import {
   DocumentIndexResult,
   EvaluationRun,
   ExperimentLeaderboard,
+  GovernanceSummary,
   Project,
   QuestionDataset,
   QuestionImportResult,
@@ -260,6 +261,70 @@ function ExperimentLeaderboardView({
    Main page component
 ───────────────────────────────────────── */
 
+function GovernanceSummaryView({ governance }: Readonly<{ governance: GovernanceSummary }>) {
+  const topEvents = governance.event_type_counts.slice(0, 5);
+
+  return (
+    <section className="status comparison-panel">
+      <div className="section-heading">
+        <h2>Audit Trail and Governance</h2>
+        <span className="badge-count">{governance.total_events}</span>
+      </div>
+
+      <div style={{ padding: "var(--sp-5)" }}>
+        <div className="metric-grid" style={{ marginBottom: "var(--sp-4)" }}>
+          <MetricCard label="Total Events" value={governance.total_events} />
+          <MetricCard label="Active Actors" value={governance.active_actor_count} />
+          <MetricCard label="Run Events" value={governance.run_event_count} />
+        </div>
+
+        {topEvents.length > 0 && (
+          <div className="mini-list" style={{ marginBottom: "var(--sp-4)" }}>
+            <h3 style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", marginBottom: "var(--sp-2)" }}>
+              Event mix
+            </h3>
+            {topEvents.map((bucket) => (
+              <div className="mini-list-item" key={bucket.key}>
+                <strong>{formatAuditLabel(bucket.key)}</strong>
+                <span>{bucket.count} events</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div>
+          <h3 style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", marginBottom: "var(--sp-2)" }}>
+            Recent activity
+          </h3>
+          {governance.recent_events.length === 0 ? (
+            <p className="muted" style={{ fontStyle: "italic" }}>
+              No audit events recorded yet.
+            </p>
+          ) : (
+            <div className="question-results">
+              {governance.recent_events.slice(0, 8).map((event) => (
+                <div className="mini-list-item" key={event.id}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--sp-4)" }}>
+                    <strong>{formatAuditLabel(event.event_type)}</strong>
+                    <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                      {formatEventTime(event.created_at)}
+                    </span>
+                  </div>
+                  <span>{event.event_summary}</span>
+                  <span>
+                    Actor {event.actor_user_id ?? "system"} / {event.entity_type}
+                    {event.evaluation_run_id ? ` / Run ${event.evaluation_run_id}` : ""}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export default function ProjectDetailPage() {
   const params = useParams<{ projectId: string }>();
   const router = useRouter();
@@ -277,6 +342,7 @@ export default function ProjectDetailPage() {
   const [selectedRunIds, setSelectedRunIds]         = useState<number[]>([]);
   const [comparison, setComparison]                 = useState<RunComparison | null>(null);
   const [leaderboard, setLeaderboard]               = useState<ExperimentLeaderboard | null>(null);
+  const [governance, setGovernance]                 = useState<GovernanceSummary | null>(null);
   const [isComparing, setIsComparing]               = useState(false);
   const [isImportingQuestions, setIsImportingQuestions] = useState(false);
   const [batchRunName, setBatchRunName]             = useState("Batch Gemini Evaluation");
@@ -299,7 +365,7 @@ export default function ProjectDetailPage() {
     if (!token) return;
 
     try {
-      const [projectData, documentData, questionData, datasetData, runData, leaderboardData] =
+      const [projectData, documentData, questionData, datasetData, runData, leaderboardData, governanceData] =
         await Promise.all([
           authRequest<Project>(`/projects/${projectId}`, { method: "GET" }, token),
           authRequest<SourceDocument[]>(`/projects/${projectId}/documents`, { method: "GET" }, token),
@@ -307,6 +373,7 @@ export default function ProjectDetailPage() {
           authRequest<QuestionDataset[]>(`/projects/${projectId}/question-datasets`, { method: "GET" }, token),
           authRequest<EvaluationRun[]>(`/projects/${projectId}/runs`, { method: "GET" }, token),
           authRequest<ExperimentLeaderboard>(`/projects/${projectId}/leaderboard`, { method: "GET" }, token),
+          authRequest<GovernanceSummary>(`/projects/${projectId}/governance-summary`, { method: "GET" }, token),
         ]);
       setProject(projectData);
       setDocuments(documentData);
@@ -314,6 +381,7 @@ export default function ProjectDetailPage() {
       setQuestionDatasets(datasetData);
       setRuns(runData);
       setLeaderboard(leaderboardData);
+      setGovernance(governanceData);
       setSelectedRunIds((current) => {
         if (current.length > 0) return current.filter((id) => runData.some((r) => r.id === id));
         return runData.slice(0, 2).map((r) => r.id);
@@ -884,6 +952,10 @@ export default function ProjectDetailPage() {
             <ExperimentLeaderboardView leaderboard={leaderboard} projectId={projectId} />
           )}
 
+          {governance && (
+            <GovernanceSummaryView governance={governance} />
+          )}
+
           {/* ── Run Comparison ── */}
           <section className="status comparison-panel">
             <div className="section-heading">
@@ -940,4 +1012,15 @@ function formatDelta(value: string | null): string {
 
 function formatQualityGate(value: string): string {
   return value.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
+function formatAuditLabel(value: string): string {
+  return value.split("_").map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
+}
+
+function formatEventTime(value: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(value));
 }

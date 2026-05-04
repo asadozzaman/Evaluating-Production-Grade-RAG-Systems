@@ -467,3 +467,27 @@ class ErrorAnnotation(TimestampMixin, Base):
     generated_answer: Mapped[GeneratedAnswer] = relationship(back_populates="error_annotations")
     evaluation_record: Mapped[EvaluationRecord | None] = relationship(back_populates="error_annotations")
     created_by: Mapped[User] = relationship(foreign_keys=[created_by_user_id])
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    actor_user_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    project_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    evaluation_run_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    test_question_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    generated_answer_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    evaluation_record_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    event_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    entity_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    entity_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    event_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )

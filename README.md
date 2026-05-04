@@ -1010,6 +1010,39 @@ questions
 
 The run page now includes a Report Builder panel that generates a Markdown report from the latest run metrics, readiness gates, calibration data, and error taxonomy.
 
+## Audit Trail and Governance
+
+Phase 21 adds project-level audit events and a governance summary for tracking who changed evaluation setup, outputs, reviews, error tags, and generated reports.
+
+Audit endpoints:
+
+```text
+GET /projects/{project_id}/audit-events
+GET /projects/{project_id}/runs/{run_id}/audit-events
+GET /projects/{project_id}/governance-summary
+```
+
+Governance summary response includes:
+
+```json
+{
+  "project_id": 47,
+  "project_name": "HR Policy RAG Assistant",
+  "total_events": 12,
+  "active_actor_count": 2,
+  "run_event_count": 7,
+  "event_type_counts": [
+    { "key": "report_built", "count": 2 }
+  ],
+  "entity_type_counts": [
+    { "key": "evaluation_run", "count": 3 }
+  ],
+  "recent_events": []
+}
+```
+
+The project page now includes an Audit Trail and Governance panel with event counts, active actors, and recent activity.
+
 ## Start the Frontend
 
 In a separate terminal:

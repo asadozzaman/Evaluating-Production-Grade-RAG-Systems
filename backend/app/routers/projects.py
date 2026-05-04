@@ -16,9 +16,10 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user, require_roles
 from app.config import BACKEND_ROOT, get_settings
 from app.database import get_db
-from app.models import DocumentChunk, ErrorAnnotation, EvaluationRecord, EvaluationRun, Project, QuestionDataset, SourceDocument, TestQuestion, User
+from app.models import AuditEvent, DocumentChunk, ErrorAnnotation, EvaluationRecord, EvaluationRun, Project, QuestionDataset, SourceDocument, TestQuestion, User
 from app.models import GeneratedAnswer, RetrievedChunk
 from app.schemas import (
+    AuditEventRead,
     AutoEvaluationRunRead,
     BatchExperimentCreate,
     BatchExperimentRead,
@@ -38,6 +39,7 @@ from app.schemas import (
     EvaluationRunUpdate,
     GeneratedAnswerCreate,
     GeneratedAnswerRead,
+    GovernanceSummaryRead,
     JudgeCalibrationRead,
     ProjectCreate,
     ProjectRead,
@@ -113,6 +115,78 @@ ERROR_SEVERITY_LABELS = {
 MIN_PRODUCTION_SCORE = Decimal("4.00")
 MIN_RETRIEVAL_HIT_RATE = Decimal("0.80")
 MIN_JUDGE_WITHIN_ONE_AGREEMENT = Decimal("80.00")
+
+
+def json_audit_default(value: object) -> str:
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def create_audit_event(
+    db: Session,
+    actor: User | None,
+    *,
+    event_type: str,
+    entity_type: str,
+    entity_id: int | None,
+    event_summary: str,
+    project_id: int | None = None,
+    run_id: int | None = None,
+    question_id: int | None = None,
+    answer_id: int | None = None,
+    evaluation_record_id: int | None = None,
+    metadata: dict[str, object] | None = None,
+) -> AuditEvent:
+    event = AuditEvent(
+        actor_user_id=actor.id if actor is not None else None,
+        project_id=project_id,
+        evaluation_run_id=run_id,
+        test_question_id=question_id,
+        generated_answer_id=answer_id,
+        evaluation_record_id=evaluation_record_id,
+        event_type=event_type,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        event_summary=event_summary,
+        metadata_json=json.dumps(metadata, default=json_audit_default, sort_keys=True) if metadata else None,
+    )
+    db.add(event)
+    return event
+
+
+def audit_bucket_counts(events: list[AuditEvent], field_name: str) -> list[dict[str, object]]:
+    counts: dict[str, int] = {}
+    for event in events:
+        key = getattr(event, field_name)
+        counts[key] = counts.get(key, 0) + 1
+    return [
+        {"key": key, "count": count}
+        for key, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def build_governance_summary(db: Session, project: Project) -> dict[str, object]:
+    events = list(
+        db.scalars(
+            select(AuditEvent)
+            .where(AuditEvent.project_id == project.id)
+            .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+        ).all()
+    )
+    actor_ids = {event.actor_user_id for event in events if event.actor_user_id is not None}
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        "total_events": len(events),
+        "active_actor_count": len(actor_ids),
+        "run_event_count": sum(1 for event in events if event.evaluation_run_id is not None),
+        "event_type_counts": audit_bucket_counts(events, "event_type"),
+        "entity_type_counts": audit_bucket_counts(events, "entity_type"),
+        "recent_events": events[:20],
+    }
 
 
 def get_project_or_404(db: Session, project_id: int) -> Project:
@@ -1561,6 +1635,17 @@ def create_project(
 ) -> Project:
     project = Project(**payload.model_dump(), created_by_user_id=current_user.id)
     db.add(project)
+    db.flush()
+    create_audit_event(
+        db,
+        current_user,
+        event_type="project_created",
+        entity_type="project",
+        entity_id=project.id,
+        project_id=project.id,
+        event_summary=f"Project '{project.name}' was created.",
+        metadata={"system_type": project.system_type, "target_users": project.target_users},
+    )
     db.commit()
     db.refresh(project)
     return project
@@ -1603,15 +1688,51 @@ def read_experiment_leaderboard(
     return build_experiment_leaderboard(db, project)
 
 
+@router.get("/{project_id}/governance-summary", response_model=GovernanceSummaryRead)
+def read_governance_summary(
+    project_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> dict[str, object]:
+    project = get_project_or_404(db, project_id)
+    return build_governance_summary(db, project)
+
+
+@router.get("/{project_id}/audit-events", response_model=list[AuditEventRead])
+def list_project_audit_events(
+    project_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> list[AuditEvent]:
+    get_project_or_404(db, project_id)
+    return list(
+        db.scalars(
+            select(AuditEvent)
+            .where(AuditEvent.project_id == project_id)
+            .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+        ).all()
+    )
+
+
 @router.patch("/{project_id}", response_model=ProjectRead)
 def update_project(
     project_id: int,
     payload: ProjectUpdate,
     db: Annotated[Session, Depends(get_db)],
-    _: WritableUser,
+    current_user: WritableUser,
 ) -> Project:
     project = get_project_or_404(db, project_id)
     apply_updates(project, payload)
+    create_audit_event(
+        db,
+        current_user,
+        event_type="project_updated",
+        entity_type="project",
+        entity_id=project.id,
+        project_id=project.id,
+        event_summary=f"Project '{project.name}' settings were updated.",
+        metadata=payload.model_dump(exclude_unset=True),
+    )
     db.commit()
     db.refresh(project)
     return project
@@ -1636,12 +1757,23 @@ def create_document(
     project_id: int,
     payload: SourceDocumentCreate,
     db: Annotated[Session, Depends(get_db)],
-    _: WritableUser,
+    current_user: WritableUser,
 ) -> SourceDocument:
     get_project_or_404(db, project_id)
     document = SourceDocument(**payload.model_dump(), project_id=project_id)
     ensure_valid_document_source(document)
     db.add(document)
+    db.flush()
+    create_audit_event(
+        db,
+        current_user,
+        event_type="document_registered",
+        entity_type="source_document",
+        entity_id=document.id,
+        project_id=project_id,
+        event_summary=f"Source document '{document.title}' was registered by URI.",
+        metadata={"document_type": document.document_type, "source_kind": document.source_kind},
+    )
     db.commit()
     db.refresh(document)
     return document
@@ -1651,7 +1783,7 @@ def create_document(
 def upload_document(
     project_id: int,
     db: Annotated[Session, Depends(get_db)],
-    _: WritableUser,
+    current_user: WritableUser,
     title: Annotated[str, Form(min_length=1, max_length=255)],
     document_type: Annotated[str, Form(min_length=1, max_length=80)],
     file: Annotated[UploadFile, File()],
@@ -1684,6 +1816,22 @@ def upload_document(
     )
     ensure_valid_document_source(document)
     db.add(document)
+    db.flush()
+    create_audit_event(
+        db,
+        current_user,
+        event_type="document_uploaded",
+        entity_type="source_document",
+        entity_id=document.id,
+        project_id=project_id,
+        event_summary=f"Source document '{document.title}' was uploaded.",
+        metadata={
+            "document_type": document.document_type,
+            "original_file_name": document.original_file_name,
+            "file_size_bytes": document.file_size_bytes,
+            "content_type": document.content_type,
+        },
+    )
     db.commit()
     db.refresh(document)
     return document
@@ -1800,6 +1948,18 @@ def create_question(
     get_project_or_404(db, project_id)
     question = TestQuestion(**payload.model_dump(), project_id=project_id, created_by_user_id=current_user.id)
     db.add(question)
+    db.flush()
+    create_audit_event(
+        db,
+        current_user,
+        event_type="question_created",
+        entity_type="test_question",
+        entity_id=question.id,
+        project_id=project_id,
+        question_id=question.id,
+        event_summary="A test question was added.",
+        metadata={"question_type": question.question_type, "expected_source": question.expected_source},
+    )
     db.commit()
     db.refresh(question)
     return question
@@ -2092,6 +2252,18 @@ def create_run(
     get_project_or_404(db, project_id)
     run = EvaluationRun(**payload.model_dump(), project_id=project_id, created_by_user_id=current_user.id)
     db.add(run)
+    db.flush()
+    create_audit_event(
+        db,
+        current_user,
+        event_type="run_created",
+        entity_type="evaluation_run",
+        entity_id=run.id,
+        project_id=project_id,
+        run_id=run.id,
+        event_summary=f"Evaluation run '{run.name}' was created.",
+        metadata={"system_version": run.system_version, "status": run.status},
+    )
     db.commit()
     db.refresh(run)
     return run
@@ -2233,11 +2405,42 @@ def build_report(
     run_id: int,
     payload: ReportBuilderRequest,
     db: Annotated[Session, Depends(get_db)],
-    _: AuthenticatedUser,
+    current_user: AuthenticatedUser,
 ) -> dict[str, object]:
     project = get_project_or_404(db, project_id)
     run = get_run_or_404(db, project_id, run_id)
-    return build_run_report(db, project, run, payload)
+    report = build_run_report(db, project, run, payload)
+    create_audit_event(
+        db,
+        current_user,
+        event_type="report_built",
+        entity_type="report",
+        entity_id=run.id,
+        project_id=project_id,
+        run_id=run_id,
+        event_summary=f"Report '{report['title']}' was generated for run '{run.name}'.",
+        metadata={"audience": payload.audience, "sections": payload.sections},
+    )
+    db.commit()
+    return report
+
+
+@router.get("/{project_id}/runs/{run_id}/audit-events", response_model=list[AuditEventRead])
+def list_run_audit_events(
+    project_id: int,
+    run_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> list[AuditEvent]:
+    get_project_or_404(db, project_id)
+    get_run_or_404(db, project_id, run_id)
+    return list(
+        db.scalars(
+            select(AuditEvent)
+            .where(AuditEvent.project_id == project_id, AuditEvent.evaluation_run_id == run_id)
+            .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+        ).all()
+    )
 
 
 @router.get("/{project_id}/runs/{run_id}/errors", response_model=list[ErrorAnnotationRead])
@@ -2375,7 +2578,7 @@ def execute_run(
     project_id: int,
     run_id: int,
     db: Annotated[Session, Depends(get_db)],
-    _: WritableUser,
+    current_user: WritableUser,
     payload: RagExecutionRequest | None = None,
 ) -> dict[str, object]:
     get_project_or_404(db, project_id)
@@ -2385,6 +2588,25 @@ def execute_run(
         result = execute_rag_run(db, run, get_settings(), retrieval_mode=retrieval_mode)
     except RagExecutionError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    create_audit_event(
+        db,
+        current_user,
+        event_type="rag_executed",
+        entity_type="evaluation_run",
+        entity_id=run.id,
+        project_id=project_id,
+        run_id=run.id,
+        event_summary=f"Gemini RAG was executed for run '{run.name}'.",
+        metadata={
+            "status": result.status,
+            "model_name": result.model_name,
+            "processed_questions": result.processed_questions,
+            "retrieved_chunks_created": result.retrieved_chunks_created,
+            "generated_answers_created": result.generated_answers_created,
+            "retrieval_mode": result.retrieval_mode,
+        },
+    )
+    db.commit()
     return {
         "run_id": result.run_id,
         "status": result.status,
@@ -2481,6 +2703,22 @@ def run_automated_clear_rag_evaluation(
         db.rollback()
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
+    create_audit_event(
+        db,
+        current_user,
+        event_type="automated_evaluation_completed",
+        entity_type="evaluation_run",
+        entity_id=run.id,
+        project_id=project_id,
+        run_id=run.id,
+        event_summary=f"Automated CLEAR-RAG evaluation completed for run '{run.name}'.",
+        metadata={
+            "evaluated_answers": evaluated_answers,
+            "skipped_answers": skipped_answers,
+            "judge_model_name": judge_model_name,
+        },
+    )
+    db.commit()
     return {
         "run_id": run.id,
         "evaluated_answers": evaluated_answers,
@@ -2513,7 +2751,7 @@ def create_retrieved_chunk(
     question_id: int,
     payload: RetrievedChunkCreate,
     db: Annotated[Session, Depends(get_db)],
-    _: WritableUser,
+    current_user: WritableUser,
 ) -> RetrievedChunk:
     validate_output_scope(db, project_id, run_id, question_id, payload.source_document_id)
     chunk = RetrievedChunk(
@@ -2522,6 +2760,19 @@ def create_retrieved_chunk(
         test_question_id=question_id,
     )
     db.add(chunk)
+    db.flush()
+    create_audit_event(
+        db,
+        current_user,
+        event_type="retrieved_chunk_added",
+        entity_type="retrieved_chunk",
+        entity_id=chunk.id,
+        project_id=project_id,
+        run_id=run_id,
+        question_id=question_id,
+        event_summary=f"Retrieved chunk rank {chunk.rank} was added.",
+        metadata={"source_document_id": chunk.source_document_id, "relevance_label": chunk.relevance_label},
+    )
     db.commit()
     db.refresh(chunk)
     return chunk
@@ -2581,7 +2832,7 @@ def create_generated_answer(
     question_id: int,
     payload: GeneratedAnswerCreate,
     db: Annotated[Session, Depends(get_db)],
-    _: WritableUser,
+    current_user: WritableUser,
 ) -> GeneratedAnswer:
     validate_output_scope(db, project_id, run_id, question_id)
     answer = GeneratedAnswer(
@@ -2590,6 +2841,20 @@ def create_generated_answer(
         test_question_id=question_id,
     )
     db.add(answer)
+    db.flush()
+    create_audit_event(
+        db,
+        current_user,
+        event_type="generated_answer_added",
+        entity_type="generated_answer",
+        entity_id=answer.id,
+        project_id=project_id,
+        run_id=run_id,
+        question_id=question_id,
+        answer_id=answer.id,
+        event_summary="A generated answer was added.",
+        metadata={"model_name": answer.model_name, "input_tokens": answer.input_tokens, "output_tokens": answer.output_tokens},
+    )
     db.commit()
     db.refresh(answer)
     return answer
@@ -2668,6 +2933,25 @@ def create_evaluation_record(
     )
     evaluation.overall_score = calculate_overall_score(evaluation)
     db.add(evaluation)
+    db.flush()
+    create_audit_event(
+        db,
+        current_user,
+        event_type="human_evaluation_created",
+        entity_type="evaluation_record",
+        entity_id=evaluation.id,
+        project_id=project_id,
+        run_id=run_id,
+        question_id=question_id,
+        answer_id=answer_id,
+        evaluation_record_id=evaluation.id,
+        event_summary="A human evaluation was recorded.",
+        metadata={
+            "overall_score": evaluation.overall_score,
+            "review_status": evaluation.review_status,
+            "evaluation_mode": evaluation.evaluation_mode,
+        },
+    )
     db.commit()
     db.refresh(evaluation)
     return evaluation
@@ -2703,6 +2987,21 @@ def create_error_annotation(
         evidence_reference=payload.evidence_reference,
     )
     db.add(annotation)
+    db.flush()
+    create_audit_event(
+        db,
+        current_user,
+        event_type="error_tag_created",
+        entity_type="error_annotation",
+        entity_id=annotation.id,
+        project_id=project_id,
+        run_id=run_id,
+        question_id=question_id,
+        answer_id=answer_id,
+        evaluation_record_id=annotation.evaluation_record_id,
+        event_summary=f"Error tag '{annotation.category}' was added.",
+        metadata={"category": annotation.category, "severity": annotation.severity, "source": annotation.source},
+    )
     db.commit()
     db.refresh(annotation)
     return annotation
@@ -2739,13 +3038,27 @@ def update_evaluation_record(
     evaluation_id: int,
     payload: EvaluationRecordUpdate,
     db: Annotated[Session, Depends(get_db)],
-    _: WritableUser,
+    current_user: WritableUser,
 ) -> EvaluationRecord:
     get_project_or_404(db, project_id)
     get_run_or_404(db, project_id, run_id)
     evaluation = get_evaluation_or_404(db, run_id, evaluation_id)
     apply_updates(evaluation, payload)
     evaluation.overall_score = calculate_overall_score(evaluation)
+    create_audit_event(
+        db,
+        current_user,
+        event_type="evaluation_updated",
+        entity_type="evaluation_record",
+        entity_id=evaluation.id,
+        project_id=project_id,
+        run_id=run_id,
+        question_id=evaluation.test_question_id,
+        answer_id=evaluation.generated_answer_id,
+        evaluation_record_id=evaluation.id,
+        event_summary="An evaluation record was updated.",
+        metadata=payload.model_dump(exclude_unset=True),
+    )
     db.commit()
     db.refresh(evaluation)
     return evaluation
@@ -2761,12 +3074,26 @@ def update_error_annotation(
     error_id: int,
     payload: ErrorAnnotationUpdate,
     db: Annotated[Session, Depends(get_db)],
-    _: WritableUser,
+    current_user: WritableUser,
 ) -> ErrorAnnotation:
     get_project_or_404(db, project_id)
     get_run_or_404(db, project_id, run_id)
     annotation = get_error_annotation_or_404(db, run_id, error_id)
     apply_updates(annotation, payload)
+    create_audit_event(
+        db,
+        current_user,
+        event_type="error_tag_updated",
+        entity_type="error_annotation",
+        entity_id=annotation.id,
+        project_id=project_id,
+        run_id=run_id,
+        question_id=annotation.test_question_id,
+        answer_id=annotation.generated_answer_id,
+        evaluation_record_id=annotation.evaluation_record_id,
+        event_summary=f"Error tag '{annotation.category}' was updated.",
+        metadata=payload.model_dump(exclude_unset=True),
+    )
     db.commit()
     db.refresh(annotation)
     return annotation
@@ -2822,6 +3149,24 @@ def review_evaluation_record(
         evaluation.suggested_improvement = payload.suggested_improvement
     evaluation.reviewed_by_user_id = current_user.id
     evaluation.reviewed_at = datetime.now(timezone.utc)
+    create_audit_event(
+        db,
+        current_user,
+        event_type="evaluation_reviewed",
+        entity_type="evaluation_record",
+        entity_id=evaluation.id,
+        project_id=project_id,
+        run_id=run_id,
+        question_id=evaluation.test_question_id,
+        answer_id=evaluation.generated_answer_id,
+        evaluation_record_id=evaluation.id,
+        event_summary=f"Evaluation review status changed to '{evaluation.review_status}'.",
+        metadata={
+            "review_status": evaluation.review_status,
+            "score_changed": bool(requested_score_changes),
+            "score_change_reason": evaluation.score_change_reason,
+        },
+    )
     db.commit()
     db.refresh(evaluation)
     return evaluation
@@ -2855,11 +3200,25 @@ def delete_error_annotation(
     run_id: int,
     error_id: int,
     db: Annotated[Session, Depends(get_db)],
-    _: WritableUser,
+    current_user: WritableUser,
 ) -> Response:
     get_project_or_404(db, project_id)
     get_run_or_404(db, project_id, run_id)
     annotation = get_error_annotation_or_404(db, run_id, error_id)
+    create_audit_event(
+        db,
+        current_user,
+        event_type="error_tag_deleted",
+        entity_type="error_annotation",
+        entity_id=annotation.id,
+        project_id=project_id,
+        run_id=run_id,
+        question_id=annotation.test_question_id,
+        answer_id=annotation.generated_answer_id,
+        evaluation_record_id=annotation.evaluation_record_id,
+        event_summary=f"Error tag '{annotation.category}' was deleted.",
+        metadata={"category": annotation.category, "severity": annotation.severity},
+    )
     db.delete(annotation)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -740,6 +740,40 @@ class ReportBuilderRead(BaseModel):
     markdown: str
 
 
+class AuditEventRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    actor_user_id: int | None
+    project_id: int | None
+    evaluation_run_id: int | None
+    test_question_id: int | None
+    generated_answer_id: int | None
+    evaluation_record_id: int | None
+    event_type: str
+    entity_type: str
+    entity_id: int | None
+    event_summary: str
+    metadata_json: str | None
+    created_at: datetime
+
+
+class AuditEventBucket(BaseModel):
+    key: str
+    count: int
+
+
+class GovernanceSummaryRead(BaseModel):
+    project_id: int
+    project_name: str
+    total_events: int
+    active_actor_count: int
+    run_event_count: int
+    event_type_counts: list[AuditEventBucket]
+    entity_type_counts: list[AuditEventBucket]
+    recent_events: list[AuditEventRead]
+
+
 class RunComparisonRunRead(BaseModel):
     run_id: int
     run_name: str

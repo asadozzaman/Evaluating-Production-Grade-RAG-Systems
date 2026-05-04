@@ -369,6 +369,38 @@ export type BuiltReport = {
   markdown: string;
 };
 
+export type AuditEvent = {
+  id: number;
+  actor_user_id: number | null;
+  project_id: number | null;
+  evaluation_run_id: number | null;
+  test_question_id: number | null;
+  generated_answer_id: number | null;
+  evaluation_record_id: number | null;
+  event_type: string;
+  entity_type: string;
+  entity_id: number | null;
+  event_summary: string;
+  metadata_json: string | null;
+  created_at: string;
+};
+
+export type AuditEventBucket = {
+  key: string;
+  count: number;
+};
+
+export type GovernanceSummary = {
+  project_id: number;
+  project_name: string;
+  total_events: number;
+  active_actor_count: number;
+  run_event_count: number;
+  event_type_counts: AuditEventBucket[];
+  entity_type_counts: AuditEventBucket[];
+  recent_events: AuditEvent[];
+};
+
 export type AutoEvaluationResult = {
   run_id: number;
   evaluated_answers: number;
