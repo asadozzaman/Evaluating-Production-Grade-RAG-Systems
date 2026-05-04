@@ -491,3 +491,30 @@ class AuditEvent(Base):
         nullable=False,
         index=True,
     )
+
+
+class BackgroundJob(Base):
+    __tablename__ = "background_jobs"
+    __table_args__ = (
+        CheckConstraint("status IN ('queued', 'running', 'completed', 'failed')", name="ck_background_jobs_status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    job_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", server_default="queued", nullable=False, index=True)
+    project_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    evaluation_run_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    requested_by_user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    current_step: Mapped[str | None] = mapped_column(String(120))
+    input_json: Mapped[str | None] = mapped_column(Text)
+    result_json: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -774,6 +774,28 @@ class GovernanceSummaryRead(BaseModel):
     recent_events: list[AuditEventRead]
 
 
+BackgroundJobStatus = Literal["queued", "running", "completed", "failed"]
+BackgroundJobType = Literal["rag_execution", "automated_evaluation", "report_builder"]
+
+
+class BackgroundJobRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    job_type: str
+    status: BackgroundJobStatus
+    project_id: int
+    evaluation_run_id: int | None
+    requested_by_user_id: int
+    current_step: str | None
+    input_json: str | None
+    result_json: str | None
+    error_message: str | None
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
 class RunComparisonRunRead(BaseModel):
     run_id: int
     run_name: str

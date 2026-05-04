@@ -8,19 +8,20 @@ from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user, require_roles
 from app.config import BACKEND_ROOT, get_settings
-from app.database import get_db
-from app.models import AuditEvent, DocumentChunk, ErrorAnnotation, EvaluationRecord, EvaluationRun, Project, QuestionDataset, SourceDocument, TestQuestion, User
+from app.database import SessionLocal, get_db
+from app.models import AuditEvent, BackgroundJob, DocumentChunk, ErrorAnnotation, EvaluationRecord, EvaluationRun, Project, QuestionDataset, SourceDocument, TestQuestion, User
 from app.models import GeneratedAnswer, RetrievedChunk
 from app.schemas import (
     AuditEventRead,
     AutoEvaluationRunRead,
+    BackgroundJobRead,
     BatchExperimentCreate,
     BatchExperimentRead,
     DocumentChunkRead,
@@ -155,6 +156,180 @@ def create_audit_event(
     )
     db.add(event)
     return event
+
+
+def create_background_job(
+    db: Session,
+    current_user: User,
+    *,
+    job_type: str,
+    project_id: int,
+    run_id: int | None = None,
+    current_step: str | None = "queued",
+    input_payload: dict[str, object] | None = None,
+) -> BackgroundJob:
+    job = BackgroundJob(
+        job_type=job_type,
+        status="queued",
+        project_id=project_id,
+        evaluation_run_id=run_id,
+        requested_by_user_id=current_user.id,
+        current_step=current_step,
+        input_json=json.dumps(input_payload, default=json_audit_default, sort_keys=True) if input_payload else None,
+    )
+    db.add(job)
+    db.flush()
+    create_audit_event(
+        db,
+        current_user,
+        event_type="background_job_queued",
+        entity_type="background_job",
+        entity_id=job.id,
+        project_id=project_id,
+        run_id=run_id,
+        event_summary=f"Background job '{job_type}' was queued.",
+        metadata={"job_type": job_type, "input": input_payload or {}},
+    )
+    return job
+
+
+def get_background_job_or_404(db: Session, project_id: int, job_id: int) -> BackgroundJob:
+    job = db.get(BackgroundJob, job_id)
+    if job is None or job.project_id != project_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Background job not found")
+    return job
+
+
+def load_job_input(job: BackgroundJob) -> dict[str, object]:
+    if not job.input_json:
+        return {}
+    try:
+        payload = json.loads(job.input_json)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def serialize_job_result(payload: dict[str, object]) -> str:
+    return json.dumps(payload, default=json_audit_default, sort_keys=True)
+
+
+def process_background_job(job_id: int) -> None:
+    db = SessionLocal()
+    try:
+        job = db.get(BackgroundJob, job_id)
+        if job is None:
+            return
+
+        actor = db.get(User, job.requested_by_user_id)
+        project = get_project_or_404(db, job.project_id)
+        run = get_run_or_404(db, job.project_id, job.evaluation_run_id) if job.evaluation_run_id is not None else None
+
+        job.status = "running"
+        job.current_step = "running"
+        job.started_at = datetime.now(timezone.utc)
+        db.commit()
+
+        input_payload = load_job_input(job)
+        result: dict[str, object]
+        if job.job_type == "rag_execution":
+            if run is None:
+                raise ValueError("RAG execution jobs require an evaluation run.")
+            retrieval_mode = str(input_payload.get("retrieval_mode") or "keyword")
+            job.current_step = "executing_rag"
+            db.commit()
+            rag_result = execute_rag_run(db, run, get_settings(), retrieval_mode=retrieval_mode)
+            result = {
+                "run_id": rag_result.run_id,
+                "status": rag_result.status,
+                "model_name": rag_result.model_name,
+                "processed_questions": rag_result.processed_questions,
+                "retrieved_chunks_created": rag_result.retrieved_chunks_created,
+                "generated_answers_created": rag_result.generated_answers_created,
+                "retrieval_mode": rag_result.retrieval_mode,
+                "message": rag_result.message,
+            }
+            if actor is not None:
+                create_audit_event(
+                    db,
+                    actor,
+                    event_type="rag_executed",
+                    entity_type="evaluation_run",
+                    entity_id=run.id,
+                    project_id=job.project_id,
+                    run_id=run.id,
+                    event_summary=f"Gemini RAG was executed by background job for run '{run.name}'.",
+                    metadata=result,
+                )
+        elif job.job_type == "automated_evaluation":
+            if run is None or actor is None:
+                raise ValueError("Automated evaluation jobs require an evaluation run and actor.")
+            job.current_step = "running_clear_rag_judge"
+            db.commit()
+            result = run_automated_clear_rag_evaluation(db, job.project_id, run, actor)
+        elif job.job_type == "report_builder":
+            if run is None or actor is None:
+                raise ValueError("Report builder jobs require an evaluation run and actor.")
+            job.current_step = "building_report"
+            db.commit()
+            report_payload = ReportBuilderRequest(**input_payload)
+            result = build_run_report(db, project, run, report_payload)
+            create_audit_event(
+                db,
+                actor,
+                event_type="report_built",
+                entity_type="report",
+                entity_id=run.id,
+                project_id=job.project_id,
+                run_id=run.id,
+                event_summary=f"Report '{result['title']}' was generated by background job for run '{run.name}'.",
+                metadata={"audience": report_payload.audience, "sections": report_payload.sections},
+            )
+        else:
+            raise ValueError(f"Unsupported background job type: {job.job_type}")
+
+        job.status = "completed"
+        job.current_step = "completed"
+        job.result_json = serialize_job_result(result)
+        job.error_message = None
+        job.completed_at = datetime.now(timezone.utc)
+        if actor is not None:
+            create_audit_event(
+                db,
+                actor,
+                event_type="background_job_completed",
+                entity_type="background_job",
+                entity_id=job.id,
+                project_id=job.project_id,
+                run_id=job.evaluation_run_id,
+                event_summary=f"Background job '{job.job_type}' completed.",
+                metadata={"job_type": job.job_type},
+            )
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        failed_job = db.get(BackgroundJob, job_id)
+        if failed_job is not None:
+            failed_job.status = "failed"
+            failed_job.current_step = "failed"
+            failed_job.error_message = str(exc)
+            failed_job.completed_at = datetime.now(timezone.utc)
+            actor = db.get(User, failed_job.requested_by_user_id)
+            if actor is not None:
+                create_audit_event(
+                    db,
+                    actor,
+                    event_type="background_job_failed",
+                    entity_type="background_job",
+                    entity_id=failed_job.id,
+                    project_id=failed_job.project_id,
+                    run_id=failed_job.evaluation_run_id,
+                    event_summary=f"Background job '{failed_job.job_type}' failed.",
+                    metadata={"error": str(exc)},
+                )
+            db.commit()
+    finally:
+        db.close()
 
 
 def audit_bucket_counts(events: list[AuditEvent], field_name: str) -> list[dict[str, object]]:
@@ -1714,6 +1889,33 @@ def list_project_audit_events(
     )
 
 
+@router.get("/{project_id}/background-jobs", response_model=list[BackgroundJobRead])
+def list_project_background_jobs(
+    project_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> list[BackgroundJob]:
+    get_project_or_404(db, project_id)
+    return list(
+        db.scalars(
+            select(BackgroundJob)
+            .where(BackgroundJob.project_id == project_id)
+            .order_by(BackgroundJob.created_at.desc(), BackgroundJob.id.desc())
+        ).all()
+    )
+
+
+@router.get("/{project_id}/background-jobs/{job_id}", response_model=BackgroundJobRead)
+def read_background_job(
+    project_id: int,
+    job_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> BackgroundJob:
+    get_project_or_404(db, project_id)
+    return get_background_job_or_404(db, project_id, job_id)
+
+
 @router.patch("/{project_id}", response_model=ProjectRead)
 def update_project(
     project_id: int,
@@ -2441,6 +2643,109 @@ def list_run_audit_events(
             .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
         ).all()
     )
+
+
+@router.get("/{project_id}/runs/{run_id}/background-jobs", response_model=list[BackgroundJobRead])
+def list_run_background_jobs(
+    project_id: int,
+    run_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    _: AuthenticatedUser,
+) -> list[BackgroundJob]:
+    get_project_or_404(db, project_id)
+    get_run_or_404(db, project_id, run_id)
+    return list(
+        db.scalars(
+            select(BackgroundJob)
+            .where(BackgroundJob.project_id == project_id, BackgroundJob.evaluation_run_id == run_id)
+            .order_by(BackgroundJob.created_at.desc(), BackgroundJob.id.desc())
+        ).all()
+    )
+
+
+@router.post(
+    "/{project_id}/runs/{run_id}/background-jobs/rag-execution",
+    response_model=BackgroundJobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def queue_rag_execution_job(
+    project_id: int,
+    run_id: int,
+    payload: RagExecutionRequest,
+    background_tasks: BackgroundTasks,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: WritableUser,
+) -> BackgroundJob:
+    get_project_or_404(db, project_id)
+    get_run_or_404(db, project_id, run_id)
+    job = create_background_job(
+        db,
+        current_user,
+        job_type="rag_execution",
+        project_id=project_id,
+        run_id=run_id,
+        input_payload=payload.model_dump(),
+    )
+    db.commit()
+    db.refresh(job)
+    background_tasks.add_task(process_background_job, job.id)
+    return job
+
+
+@router.post(
+    "/{project_id}/runs/{run_id}/background-jobs/auto-evaluation",
+    response_model=BackgroundJobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def queue_auto_evaluation_job(
+    project_id: int,
+    run_id: int,
+    background_tasks: BackgroundTasks,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: WritableUser,
+) -> BackgroundJob:
+    get_project_or_404(db, project_id)
+    get_run_or_404(db, project_id, run_id)
+    job = create_background_job(
+        db,
+        current_user,
+        job_type="automated_evaluation",
+        project_id=project_id,
+        run_id=run_id,
+    )
+    db.commit()
+    db.refresh(job)
+    background_tasks.add_task(process_background_job, job.id)
+    return job
+
+
+@router.post(
+    "/{project_id}/runs/{run_id}/background-jobs/report",
+    response_model=BackgroundJobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def queue_report_job(
+    project_id: int,
+    run_id: int,
+    payload: ReportBuilderRequest,
+    background_tasks: BackgroundTasks,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: AuthenticatedUser,
+) -> BackgroundJob:
+    get_project_or_404(db, project_id)
+    get_run_or_404(db, project_id, run_id)
+    job = create_background_job(
+        db,
+        current_user,
+        job_type="report_builder",
+        project_id=project_id,
+        run_id=run_id,
+        input_payload=payload.model_dump(),
+    )
+    db.commit()
+    db.refresh(job)
+    background_tasks.add_task(process_background_job, job.id)
+    return job
 
 
 @router.get("/{project_id}/runs/{run_id}/errors", response_model=list[ErrorAnnotationRead])

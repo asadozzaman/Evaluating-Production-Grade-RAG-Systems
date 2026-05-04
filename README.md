@@ -1043,6 +1043,123 @@ Governance summary response includes:
 
 The project page now includes an Audit Trail and Governance panel with event counts, active actors, and recent activity.
 
+## Background Jobs
+
+Phase 22 adds persistent background job tracking for long-running evaluation work.
+
+Background job endpoints:
+
+```text
+GET  /projects/{project_id}/background-jobs
+GET  /projects/{project_id}/background-jobs/{job_id}
+GET  /projects/{project_id}/runs/{run_id}/background-jobs
+POST /projects/{project_id}/runs/{run_id}/background-jobs/rag-execution
+POST /projects/{project_id}/runs/{run_id}/background-jobs/auto-evaluation
+POST /projects/{project_id}/runs/{run_id}/background-jobs/report
+```
+
+Example report job request:
+
+```json
+{
+  "title": "Background Evaluation Report",
+  "audience": "technical",
+  "sections": ["overview", "readiness", "scores", "questions"]
+}
+```
+
+Job records include:
+
+```json
+{
+  "id": 1,
+  "job_type": "report_builder",
+  "status": "completed",
+  "project_id": 51,
+  "evaluation_run_id": 52,
+  "current_step": "completed",
+  "result_json": "{...}",
+  "error_message": null
+}
+```
+
+The run page now includes a Background Jobs panel where users can queue RAG execution, automated evaluation, and report generation jobs, then refresh job status.
+
+## Reset and Seed Clean Demo Data
+
+Use this when you want to clean all project/evaluation data and recreate a fresh sample project. This keeps existing login users and roles.
+
+From the backend folder:
+
+```powershell
+cd backend
+python -m alembic upgrade head
+python scripts/reset_demo_data.py
+```
+
+The script deletes:
+
+```text
+projects
+source documents
+uploaded document metadata and files
+document chunks
+question datasets
+test questions
+evaluation runs
+retrieved chunks
+generated answers
+human/automated evaluations
+error taxonomy annotations
+audit events
+background jobs
+```
+
+The script keeps:
+
+```text
+users
+roles
+user role assignments
+```
+
+If the default users do not already exist, the script creates them:
+
+```text
+Admin login:  admin@clearrag.com / AdminPass123!
+Viewer login: viewer@clearrag.com / ViewerPass123!
+```
+
+After reset, the clean sample data is:
+
+```text
+Project: HR Policy RAG Assistant
+Document: HR Leave Policy
+Dataset: HR Policy Regression Set
+Run: Baseline Evaluation
+Questions: 4
+Generated answers: 4
+Human evaluations: 4
+Error tags: 1
+Background jobs: 1 completed report job
+```
+
+Open these pages:
+
+```text
+Project page: http://localhost:3000/dashboard/projects/1
+Run page:     http://localhost:3000/dashboard/projects/1/runs/1
+API health:   http://localhost:8000/health
+```
+
+Quick API check:
+
+```powershell
+$login = Invoke-RestMethod -Uri "http://localhost:8000/auth/login" -Method Post -ContentType "application/json" -Body '{"email":"admin@clearrag.com","password":"AdminPass123!"}'
+$headers = @{ Authorization = "Bearer $($login.access_token)" }
+Invoke-RestMethod -Uri "http://localhost:8000/projects/1/runs/1/summary" -Headers $headers
+```
+
 ## Start the Frontend
 
 In a separate terminal:

@@ -7,6 +7,7 @@ import TopBar from "../../../../../components/TopBar";
 import {
   API_URL,
   AutoEvaluationResult,
+  BackgroundJob,
   BuiltReport,
   EvaluationRun,
   EvaluationRecord,
@@ -325,6 +326,71 @@ function ReportBuilderPanel({
 }
 
 /* ── Production readiness ── */
+function BackgroundJobsPanel({
+  jobs,
+  isQueueing,
+  onQueueRag,
+  onQueueEvaluation,
+  onQueueReport,
+  onRefresh,
+}: Readonly<{
+  jobs: BackgroundJob[];
+  isQueueing: boolean;
+  onQueueRag: () => void;
+  onQueueEvaluation: () => void;
+  onQueueReport: () => void;
+  onRefresh: () => void;
+}>) {
+  return (
+    <section className="status comparison-panel">
+      <div className="section-heading">
+        <h2>Background Jobs</h2>
+        <span className="badge-count">{jobs.length}</span>
+      </div>
+
+      <div style={{ padding: "var(--sp-5)", display: "grid", gap: "var(--sp-4)" }}>
+        <div style={{ display: "flex", gap: "var(--sp-3)", flexWrap: "wrap" }}>
+          <button type="button" className={`btn btn-primary${isQueueing ? " btn-loading" : ""}`} onClick={onQueueRag} disabled={isQueueing}>
+            {isQueueing ? "" : "Queue RAG job"}
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={onQueueEvaluation} disabled={isQueueing}>
+            Queue evaluation job
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={onQueueReport} disabled={isQueueing}>
+            Queue report job
+          </button>
+          <button type="button" className="btn btn-outline" onClick={onRefresh}>
+            Refresh jobs
+          </button>
+        </div>
+
+        {jobs.length === 0 ? (
+          <p className="muted" style={{ fontStyle: "italic" }}>No background jobs queued for this run yet.</p>
+        ) : (
+          <div className="question-results">
+            {jobs.slice(0, 8).map((job) => (
+              <div className="mini-list-item" key={job.id}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: "var(--sp-4)" }}>
+                  <strong>{formatJobType(job.job_type)}</strong>
+                  <span className={
+                    job.status === "completed" ? "badge badge-green" :
+                    job.status === "failed"    ? "badge badge-red"   :
+                    "badge badge-slate"
+                  }>
+                    {job.status}
+                  </span>
+                </div>
+                <span>Job {job.id} / {job.current_step ?? "queued"}</span>
+                {job.error_message && <span>{job.error_message}</span>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function ProductionReadinessPanel({ report }: Readonly<{ report: ProductionReadinessReport }>) {
   return (
     <section className="status analytics-panel">
@@ -763,12 +829,14 @@ export default function RunOutputPage() {
   const [errorTaxonomy,        setErrorTaxonomy]        = useState<ErrorTaxonomyReport | null>(null);
   const [productionReadiness,  setProductionReadiness]  = useState<ProductionReadinessReport | null>(null);
   const [builtReport,          setBuiltReport]          = useState<BuiltReport | null>(null);
+  const [backgroundJobs,       setBackgroundJobs]       = useState<BackgroundJob[]>([]);
   const [executionResult,      setExecutionResult]      = useState<RagExecutionResult | null>(null);
   const [autoEvaluationResult, setAutoEvaluationResult] = useState<AutoEvaluationResult | null>(null);
   const [retrievalMode,        setRetrievalMode]        = useState<"keyword" | "vector">("keyword");
   const [isExecuting,          setIsExecuting]          = useState(false);
   const [isAutoEvaluating,     setIsAutoEvaluating]     = useState(false);
   const [isBuildingReport,     setIsBuildingReport]     = useState(false);
+  const [isQueueingJob,        setIsQueueingJob]        = useState(false);
   const [error,                setError]                = useState("");
 
   const selectedQuestion = useMemo(
@@ -816,6 +884,17 @@ export default function RunOutputPage() {
     setProductionReadiness(readinessData);
   }, [getToken, projectId, runId]);
 
+  const loadBackgroundJobs = useCallback(async () => {
+    const token = getToken();
+    if (!token) return;
+    const jobs = await authRequest<BackgroundJob[]>(
+      `/projects/${projectId}/runs/${runId}/background-jobs`,
+      { method: "GET" },
+      token,
+    );
+    setBackgroundJobs(jobs);
+  }, [getToken, projectId, runId]);
+
   const loadPage = useCallback(async () => {
     const token = getToken();
     if (!token) return;
@@ -823,7 +902,7 @@ export default function RunOutputPage() {
     try {
       const [
         projectData, runData, documentData, questionData,
-        summaryData, reviewData, judgeData, errorData, readinessData,
+        summaryData, reviewData, judgeData, errorData, readinessData, jobData,
       ] = await Promise.all([
         authRequest<Project>(`/projects/${projectId}`, { method: "GET" }, token),
         authRequest<EvaluationRun>(`/projects/${projectId}/runs/${runId}`, { method: "GET" }, token),
@@ -834,6 +913,7 @@ export default function RunOutputPage() {
         authRequest<JudgeCalibrationReport>(`/projects/${projectId}/runs/${runId}/judge-calibration`, { method: "GET" }, token),
         authRequest<ErrorTaxonomyReport>(`/projects/${projectId}/runs/${runId}/error-taxonomy`, { method: "GET" }, token),
         authRequest<ProductionReadinessReport>(`/projects/${projectId}/runs/${runId}/production-readiness`, { method: "GET" }, token),
+        authRequest<BackgroundJob[]>(`/projects/${projectId}/runs/${runId}/background-jobs`, { method: "GET" }, token),
       ]);
       setProject(projectData);
       setRun(runData);
@@ -844,6 +924,7 @@ export default function RunOutputPage() {
       setJudgeCalibration(judgeData);
       setErrorTaxonomy(errorData);
       setProductionReadiness(readinessData);
+      setBackgroundJobs(jobData);
       const firstId = questionData[0] ? String(questionData[0].id) : "";
       setSelectedQuestionId((current) => current || firstId);
       if (firstId) await loadOutputs(firstId);
@@ -956,6 +1037,41 @@ export default function RunOutputPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to run automated CLEAR-RAG evaluation");
     } finally { setIsAutoEvaluating(false); }
+  }
+
+  async function queueBackgroundJob(kind: "rag" | "evaluation" | "report") {
+    setError("");
+    const token = getToken();
+    if (!token) return;
+    const endpoint =
+      kind === "rag" ? "rag-execution" :
+      kind === "evaluation" ? "auto-evaluation" :
+      "report";
+    const body =
+      kind === "rag"
+        ? JSON.stringify({ retrieval_mode: retrievalMode })
+        : kind === "report"
+          ? JSON.stringify({
+              title: `${run?.name ?? "Run"} Background Report`,
+              audience: "technical",
+              sections: reportSections.map((section) => section.value),
+            })
+          : undefined;
+    setIsQueueingJob(true);
+    try {
+      await authRequest<BackgroundJob>(
+        `/projects/${projectId}/runs/${runId}/background-jobs/${endpoint}`,
+        { method: "POST", ...(body ? { body } : {}) },
+        token,
+      );
+      await loadBackgroundJobs();
+      await loadSummary().catch(() => undefined);
+      if (selectedQuestionId) await loadOutputs(selectedQuestionId).catch(() => undefined);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to queue background job");
+    } finally {
+      setIsQueueingJob(false);
+    }
   }
 
   async function submitEvaluation(answerId: number, event: FormEvent<HTMLFormElement>) {
@@ -1250,6 +1366,14 @@ export default function RunOutputPage() {
           {/* ── Analytics, readiness, review, calibration, errors ── */}
           {summary            && <RunAnalytics summary={summary} onDownload={downloadExport} />}
           {productionReadiness && <ProductionReadinessPanel report={productionReadiness} />}
+          <BackgroundJobsPanel
+            jobs={backgroundJobs}
+            isQueueing={isQueueingJob}
+            onQueueRag={() => queueBackgroundJob("rag")}
+            onQueueEvaluation={() => queueBackgroundJob("evaluation")}
+            onQueueReport={() => queueBackgroundJob("report")}
+            onRefresh={loadBackgroundJobs}
+          />
           <ReportBuilderPanel report={builtReport} isBuilding={isBuildingReport} onBuild={buildReport} />
           {reviewDashboard    && <ReviewDashboard dashboard={reviewDashboard} onSubmitReview={submitReview} />}
           {judgeCalibration   && <JudgeCalibrationPanel report={judgeCalibration} />}
@@ -1410,6 +1534,10 @@ function optionalString(value: FormDataEntryValue | null): string | null {
 }
 
 function formatMetric(value: string | null): string { return value ?? "n/a"; }
+
+function formatJobType(value: string): string {
+  return value.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
 
 function formatSignedMetric(value: string | null): string {
   if (value === null) return "n/a";

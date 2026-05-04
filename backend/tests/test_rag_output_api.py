@@ -1653,6 +1653,64 @@ def test_audit_trail_and_governance_records_key_events(
     assert any(bucket["key"] == "report_built" for bucket in payload["event_type_counts"])
 
 
+def test_background_report_job_completes_and_records_audit_events(
+    client_and_db: tuple[TestClient, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, db_factory = client_and_db
+    monkeypatch.setattr("app.routers.projects.SessionLocal", db_factory)
+    create_user(db_factory, "admin@example.com", "admin")
+    create_user(db_factory, "viewer@example.com", "viewer")
+    admin_token = login(client, "admin@example.com")
+    viewer_token = login(client, "viewer@example.com")
+    graph = create_setup_graph(client, admin_token, "Background Jobs")
+
+    answer = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/questions/{graph['question_id']}/generated-answers",
+        json={
+            "answer_text": "Employees receive 20 days of annual leave after one year.",
+            "model_name": "gemini-test",
+        },
+        headers=auth_headers(admin_token),
+    )
+    assert answer.status_code == 201, answer.text
+
+    queued = client.post(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/background-jobs/report",
+        json={"title": "Background Job Report", "audience": "technical", "sections": ["overview", "questions"]},
+        headers=auth_headers(viewer_token),
+    )
+    assert queued.status_code == 202, queued.text
+    job_id = queued.json()["id"]
+
+    job = client.get(
+        f"/projects/{graph['project_id']}/background-jobs/{job_id}",
+        headers=auth_headers(viewer_token),
+    )
+    assert job.status_code == 200, job.text
+    payload = job.json()
+    assert payload["job_type"] == "report_builder"
+    assert payload["status"] == "completed"
+    assert payload["current_step"] == "completed"
+    assert "Background Job Report" in payload["result_json"]
+    assert payload["error_message"] is None
+
+    run_jobs = client.get(
+        f"/projects/{graph['project_id']}/runs/{graph['run_id']}/background-jobs",
+        headers=auth_headers(viewer_token),
+    )
+    assert run_jobs.status_code == 200, run_jobs.text
+    assert run_jobs.json()[0]["id"] == job_id
+
+    audit_events = client.get(
+        f"/projects/{graph['project_id']}/audit-events",
+        headers=auth_headers(viewer_token),
+    )
+    assert audit_events.status_code == 200, audit_events.text
+    event_types = {event["event_type"] for event in audit_events.json()}
+    assert {"background_job_queued", "background_job_completed", "report_built"}.issubset(event_types)
+
+
 def test_question_dataset_import_csv_json_validation_and_role_access(
     client_and_db: tuple[TestClient, sessionmaker[Session]],
 ) -> None:

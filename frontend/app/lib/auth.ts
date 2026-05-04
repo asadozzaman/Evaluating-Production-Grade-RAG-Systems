@@ -401,6 +401,22 @@ export type GovernanceSummary = {
   recent_events: AuditEvent[];
 };
 
+export type BackgroundJob = {
+  id: number;
+  job_type: string;
+  status: "queued" | "running" | "completed" | "failed";
+  project_id: number;
+  evaluation_run_id: number | null;
+  requested_by_user_id: number;
+  current_step: string | null;
+  input_json: string | null;
+  result_json: string | null;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+};
+
 export type AutoEvaluationResult = {
   run_id: number;
   evaluated_answers: number;
